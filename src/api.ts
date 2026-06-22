@@ -33,7 +33,7 @@ const GOOGLE_PROVIDERS: Record<string, ProviderConfig> = {
 
 export function getProviderKind(model: Model<any>): ProviderKind {
     if (GOOGLE_PROVIDERS[model.provider] || GOOGLE_PROVIDERS[model.api]) return "google";
-    if (model.api === "openai-responses") return "openai";
+    if (model.api === "openai-responses" || model.api === "openai-codex-responses") return "openai";
     if (model.api === "anthropic-messages") return "anthropic";
     return "unsupported";
 }
@@ -126,7 +126,7 @@ type SseEvent = {
 async function readSseEvents(
     response: Response,
     signal: AbortSignal | undefined,
-    onEvent: (event: SseEvent) => void | Promise<void>
+    onEvent: (event: SseEvent) => boolean | void | Promise<boolean | void>
 ): Promise<void> {
     if (!response.body) {
         throw new Error("No response body");
@@ -137,59 +137,78 @@ async function readSseEvents(
     let buffer = "";
     let currentEventData = "";
     let currentEventName = "";
+    let stopRequested = false;
+    let reachedEof = false;
 
-    const flushEvent = async () => {
-        if (!currentEventData) return;
+    const flushEvent = async (): Promise<boolean> => {
+        if (!currentEventData) return false;
         const raw = currentEventData.trim();
         currentEventData = "";
         const eventName = currentEventName;
         currentEventName = "";
-        if (!raw || raw === "[DONE]") return;
+        if (!raw || raw === "[DONE]") return false;
 
         let data: any;
         try {
             data = JSON.parse(raw);
         } catch {
-            return;
+            return false;
         }
-        await onEvent({ event: eventName, data });
+        return await onEvent({ event: eventName, data }) === true;
     };
 
-    while (true) {
-        if (signal?.aborted) {
-            throw new Error("Request was aborted");
-        }
-
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-            if (line === "" || line === "\r") {
-                await flushEvent();
-                continue;
+    try {
+        readLoop: while (true) {
+            if (signal?.aborted) {
+                throw new Error("Request was aborted");
             }
 
+            const { done, value } = await reader.read();
+            if (done) {
+                reachedEof = true;
+                break;
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
+
+            for (const line of lines) {
+                if (line === "" || line === "\r") {
+                    if (await flushEvent()) {
+                        stopRequested = true;
+                        break readLoop;
+                    }
+                    continue;
+                }
+
+                if (line.startsWith("data:")) {
+                    const data = line.slice(5).trim();
+                    currentEventData = currentEventData ? currentEventData + "\n" + data : data;
+                } else if (line.startsWith("event:")) {
+                    currentEventName = line.slice(6).trim();
+                }
+            }
+        }
+
+        if (!stopRequested && buffer.trim()) {
+            const line = buffer.trim();
             if (line.startsWith("data:")) {
                 const data = line.slice(5).trim();
                 currentEventData = currentEventData ? currentEventData + "\n" + data : data;
-            } else if (line.startsWith("event:")) {
-                currentEventName = line.slice(6).trim();
             }
         }
-    }
-
-    if (buffer.trim()) {
-        const line = buffer.trim();
-        if (line.startsWith("data:")) {
-            const data = line.slice(5).trim();
-            currentEventData = currentEventData ? currentEventData + "\n" + data : data;
+        if (!stopRequested) stopRequested = await flushEvent();
+    } finally {
+        if (!reachedEof) {
+            try {
+                await reader.cancel();
+            } catch {
+                // Ignore cancellation failures while cleaning up an interrupted stream.
+            }
         }
+        reader.releaseLock();
     }
-    await flushEvent();
 }
 
 function extractPromptFromGeminiBody(body: any): string {
@@ -208,6 +227,34 @@ function extractPromptFromGeminiBody(body: any): string {
 
 function trimTrailingSlash(value: string): string {
     return value.replace(/\/+$/, "");
+}
+
+function isOpenAICodexModel(model: Model<any>): boolean {
+    return model.api === "openai-codex-responses";
+}
+
+function resolveOpenAIResponsesUrl(model: Model<any>): string {
+    const base = trimTrailingSlash(model.baseUrl);
+    if (!isOpenAICodexModel(model)) return `${base}/responses`;
+    if (base.endsWith("/codex/responses")) return base;
+    if (base.endsWith("/codex")) return `${base}/responses`;
+    return `${base}/codex/responses`;
+}
+
+function extractOpenAICodexAccountId(token: string): string {
+    try {
+        const parts = token.split(".");
+        if (parts.length !== 3) throw new Error("Invalid token");
+        const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+        const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+        const bytes = Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
+        const payload = JSON.parse(new TextDecoder().decode(bytes));
+        const accountId = payload?.["https://api.openai.com/auth"]?.chatgpt_account_id;
+        if (typeof accountId !== "string" || !accountId) throw new Error("Missing account ID");
+        return accountId;
+    } catch {
+        throw new Error("Failed to extract ChatGPT account ID from openai-codex credentials");
+    }
 }
 
 function resolveAnthropicMessagesUrl(baseUrl: string): string {
@@ -561,31 +608,55 @@ async function callOpenAIStream(
         throw new Error(auth.error || "Failed to get API key and headers");
     }
 
-    const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream",
-        ...(model.headers || {}),
-        ...(auth.headers || {}),
-    };
-    if (auth.apiKey && !headers.Authorization && !headers.authorization) {
-        headers.Authorization = `Bearer ${auth.apiKey}`;
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(model.headers || {})) headers.set(name, value);
+    for (const [name, value] of Object.entries(auth.headers || {})) headers.set(name, value);
+    if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    if (!headers.has("Accept")) headers.set("Accept", "text/event-stream");
+    if (auth.apiKey && !headers.has("Authorization")) headers.set("Authorization", `Bearer ${auth.apiKey}`);
+
+    const isCodex = isOpenAICodexModel(model);
+    if (isCodex) {
+        const authorization = headers.get("Authorization");
+        const hasBearerAuth = typeof authorization === "string" && /^Bearer\s+\S+/i.test(authorization);
+        if (!auth.apiKey && !hasBearerAuth) {
+            throw new Error("No OAuth credential configured for openai-codex model");
+        }
+        if (!headers.has("chatgpt-account-id")) {
+            if (!auth.apiKey) {
+                throw new Error("No ChatGPT account ID configured for openai-codex model");
+            }
+            headers.set("chatgpt-account-id", extractOpenAICodexAccountId(auth.apiKey));
+        }
+        if (!headers.has("originator")) headers.set("originator", "codex_cli_rs");
     }
+    const requestHeaders = Object.fromEntries(headers.entries());
 
     const requestBody: any = {
         model: model.id,
-        input: prompt,
+        input: isCodex
+            ? [{ role: "user", content: [{ type: "input_text", text: prompt }] }]
+            : prompt,
         tools: [{ type: "web_search" }],
-        include: ["web_search_call.action.sources", "web_search_call.results"],
+        include: isCodex
+            ? ["web_search_call.action.sources"]
+            : ["web_search_call.action.sources", "web_search_call.results"],
         stream: true,
         store: false,
     };
     if (model.reasoning) {
         requestBody.reasoning = { effort: "none" };
     }
+    if (isCodex) {
+        requestBody.instructions = "Answer the user's request using web search when needed.";
+        requestBody.text = { verbosity: "low" };
+        requestBody.tool_choice = "required";
+        requestBody.parallel_tool_calls = true;
+    }
 
-    const response = await fetch(`${trimTrailingSlash(model.baseUrl)}/responses`, {
+    const response = await fetch(resolveOpenAIResponsesUrl(model), {
         method: "POST",
-        headers,
+        headers: requestHeaders,
         body: JSON.stringify(requestBody),
         signal
     });
@@ -649,7 +720,14 @@ async function callOpenAIStream(
                 raw: action,
             });
         }
-        nativeSearchCalls.push(call);
+        const existingCall = call.id ? nativeSearchCalls.find((existing) => existing.id === call.id) : undefined;
+        if (existingCall) {
+            Object.assign(existingCall, Object.fromEntries(
+                Object.entries(call).filter(([, value]) => value !== undefined)
+            ));
+        } else {
+            nativeSearchCalls.push(call);
+        }
     };
 
     const collectFromResponse = (response: any) => {
@@ -664,7 +742,10 @@ async function callOpenAIStream(
     };
 
     await readSseEvents(response, signal, ({ data: event }) => {
-        if (event.type === "response.output_text.delta") {
+        if (event.type === "error" || event.type === "response.failed") {
+            const message = event.message || event.error?.message || event.response?.error?.message;
+            throw new Error(message || JSON.stringify(event.error || event.response?.error || event));
+        } else if (event.type === "response.output_text.delta") {
             accumulatedText += event.delta || "";
             onUpdate?.({
                 content: [{ type: "text", text: accumulatedText }],
@@ -674,8 +755,12 @@ async function callOpenAIStream(
             collectAnnotation(event.annotation);
         } else if (event.type === "response.output_item.added" || event.type === "response.output_item.done") {
             collectWebSearchCall(event.item);
-        } else if (event.type === "response.completed") {
+        } else if (event.type === "response.incomplete" || event.response?.status === "incomplete") {
             collectFromResponse(event.response);
+            if (isCodex) return true;
+        } else if (event.type === "response.completed" || event.type === "response.done") {
+            collectFromResponse(event.response);
+            if (isCodex) return true;
         } else if (event.type === "response.web_search_call.in_progress" || event.type === "response.web_search_call.searching" || event.type === "response.web_search_call.completed") {
             pushNativeSearchEvent(nativeSearchEvents, event.type);
             const call = nativeSearchCalls.find((item) => item.id === event.item_id);
@@ -687,11 +772,6 @@ async function callOpenAIStream(
                     details: { streaming: true, searching: true }
                 });
             }
-        } else if (event.type === "response.failed") {
-            const error = event.response?.error;
-            throw new Error(error?.message || JSON.stringify(error || event.response || event));
-        } else if (event.type === "error") {
-            throw new Error(event.message || JSON.stringify(event));
         }
     });
 

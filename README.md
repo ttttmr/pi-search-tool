@@ -12,6 +12,7 @@ Search the web using your currently selected model. Automatically picks the righ
 |---|---|
 | Google Gemini | Grounding with Google Search |
 | OpenAI | Responses API web search |
+| OpenAI Codex | Codex Responses API web search |
 | Anthropic | Messages API web search |
 
 Supports passing up to 20 additional URLs to analyze alongside the query.

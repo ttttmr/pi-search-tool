@@ -9,6 +9,12 @@ import { getModel, getWebSearchModel, missingConfigResult, missingWebSearchConfi
 import { urlContext } from '../src/url_context.ts';
 import { webSearch } from '../src/web_search.ts';
 
+const OPENAI_CODEX_TOKEN = [
+  'eyJhbGciOiJub25lIn0',
+  'eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF90ZXN0In0sIm5vdGUiOiLguJrguLHguI3guIrguLU_MTAifQ',
+  'signature',
+].join('.');
+
 function sse(events) {
   return events.map((event) => {
     const name = event.event ? `event: ${event.event}\n` : '';
@@ -16,12 +22,13 @@ function sse(events) {
   }).join('');
 }
 
-function mockCtx(apiKey = 'test-key', model = undefined) {
+function mockCtx(apiKey, model = undefined, headers = undefined) {
+  const resolvedApiKey = arguments.length === 0 ? 'test-key' : apiKey;
   return {
     model,
     modelRegistry: {
       async getApiKeyAndHeaders() {
-        return { ok: true, apiKey };
+        return { ok: true, apiKey: resolvedApiKey, headers };
       },
       getAvailable() {
         return model ? [model] : [];
@@ -84,6 +91,359 @@ test('OpenAI stream exposes native search calls, queries, URLs, and citations', 
     assert.equal(result.sources[0].url, 'https://platform.openai.com/docs/guides/tools-web-search');
     assert.equal(result.sources[0].title, 'OpenAI docs');
     assert.equal(result.sources.length, 1);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('OpenAI Codex stream uses Codex Responses transport with native web search', async () => {
+  const previousFetch = globalThis.fetch;
+  const tokenPayload = OPENAI_CODEX_TOKEN.split('.')[1];
+  assert.match(tokenPayload, /[-_]/);
+  assert.notEqual(tokenPayload.length % 4, 0);
+  globalThis.fetch = async (url, init) => {
+    assert.equal(url, 'https://chatgpt.com/backend-api/codex/responses');
+    assert.equal(init.headers.authorization, `Bearer ${OPENAI_CODEX_TOKEN}`);
+    assert.equal(init.headers['chatgpt-account-id'], 'acct_test');
+    assert.equal(init.headers.originator, 'codex_cli_rs');
+    assert.equal(Object.keys(init.headers).some((key) => key.toLowerCase() === 'openai-beta'), false);
+
+    const body = JSON.parse(init.body);
+    assert.equal(body.model, 'gpt-5.5');
+    assert.deepEqual(body.input, [{
+      role: 'user',
+      content: [{ type: 'input_text', text: 'Search with Codex' }],
+    }]);
+    assert.deepEqual(body.tools, [{ type: 'web_search' }]);
+    assert.deepEqual(body.include, ['web_search_call.action.sources']);
+    assert.equal(body.tool_choice, 'required');
+    assert.equal(body.parallel_tool_calls, true);
+    assert.equal(body.stream, true);
+    assert.equal(body.store, false);
+
+    return makeResponse([
+      { data: { type: 'response.web_search_call.in_progress', item_id: 'ws_codex' } },
+      { data: { type: 'response.output_text.delta', delta: 'Codex search answer' } },
+      { data: { type: 'response.web_search_call.completed', item_id: 'ws_codex' } },
+      { data: { type: 'response.done', response: { output: [
+        { type: 'web_search_call', id: 'ws_codex', status: 'completed', action: { type: 'search', query: 'Codex web search' } },
+      ] } } },
+    ]);
+  };
+
+  try {
+    const result = await callApiStream(mockCtx(OPENAI_CODEX_TOKEN), {
+      id: 'gpt-5.5',
+      provider: 'openai-codex',
+      api: 'openai-codex-responses',
+      baseUrl: 'https://chatgpt.com/backend-api',
+      reasoning: true,
+      headers: {},
+    }, { contents: [{ parts: [{ text: 'Search with Codex' }] }] });
+
+    assert.equal(result.providerKind, 'openai');
+    assert.equal(result.nativeSearchUsed, true);
+    assert.equal(result.text, 'Codex search answer');
+    assert.deepEqual(result.searchQueries, ['Codex web search']);
+    assert.equal(result.nativeSearchCalls.length, 1);
+    assert.equal(result.nativeSearchCalls[0].status, 'completed');
+    assert.deepEqual(result.nativeSearchCalls[0].queries, ['Codex web search']);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('OpenAI Codex stream stops after terminal event without waiting for EOF', async () => {
+  const previousFetch = globalThis.fetch;
+  let cancelled = false;
+  let timeout;
+  globalThis.fetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(sse([
+        { data: { type: 'response.output_text.delta', delta: 'Terminal Codex answer' } },
+        { data: { type: 'response.done', response: { output: [
+          { type: 'web_search_call', id: 'ws_terminal', status: 'completed', action: { type: 'search', query: 'terminal query' } },
+        ] } } },
+      ])));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  }), {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+
+  try {
+    const result = await Promise.race([
+      callApiStream(mockCtx(OPENAI_CODEX_TOKEN), {
+        id: 'gpt-5.5',
+        provider: 'openai-codex',
+        api: 'openai-codex-responses',
+        baseUrl: 'https://chatgpt.com/backend-api',
+        reasoning: true,
+        headers: {},
+      }, { contents: [{ parts: [{ text: 'Search with Codex' }] }] }),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('Codex stream did not stop')), 250);
+      }),
+    ]);
+
+    assert.equal(result.text, 'Terminal Codex answer');
+    assert.deepEqual(result.searchQueries, ['terminal query']);
+    assert.equal(cancelled, true);
+  } finally {
+    clearTimeout(timeout);
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('OpenAI Codex stream rejects error events with server message', async () => {
+  const previousFetch = globalThis.fetch;
+  let cancelled = false;
+  globalThis.fetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(sse([
+        { data: { type: 'error', error: { message: 'Codex SSE error message' } } },
+      ])));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  }), {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+
+  try {
+    await assert.rejects(
+      callApiStream(mockCtx(OPENAI_CODEX_TOKEN), {
+        id: 'gpt-5.5',
+        provider: 'openai-codex',
+        api: 'openai-codex-responses',
+        baseUrl: 'https://chatgpt.com/backend-api',
+        reasoning: true,
+        headers: {},
+      }, { contents: [{ parts: [{ text: 'Search with Codex' }] }] }),
+      /Codex SSE error message/,
+    );
+    assert.equal(cancelled, true);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('OpenAI Codex stream rejects response.failed with server message', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => makeResponse([
+    { data: { type: 'response.failed', response: { error: { message: 'Codex response failed message' } } } },
+    { data: { type: 'response.done', response: { output: [] } } },
+  ]);
+
+  try {
+    await assert.rejects(
+      callApiStream(mockCtx(OPENAI_CODEX_TOKEN), {
+        id: 'gpt-5.5',
+        provider: 'openai-codex',
+        api: 'openai-codex-responses',
+        baseUrl: 'https://chatgpt.com/backend-api',
+        reasoning: true,
+        headers: {},
+      }, { contents: [{ parts: [{ text: 'Search with Codex' }] }] }),
+      /Codex response failed message/,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('OpenAI Codex stream preserves custom headers over defaults', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    assert.equal(init.headers.authorization, 'Bearer explicit-auth');
+    assert.equal(init.headers['chatgpt-account-id'], 'explicit-account');
+    assert.equal(init.headers.originator, 'custom-originator');
+    assert.equal(init.headers['openai-beta'], 'custom-beta');
+    assert.equal(init.headers.accept, 'application/x-test-stream');
+    assert.equal(Object.keys(init.headers).filter((key) => key.toLowerCase() === 'originator').length, 1);
+    return makeResponse([
+      { data: { type: 'response.output_text.delta', delta: 'Custom headers preserved' } },
+      { data: { type: 'response.done', response: { output: [] } } },
+    ]);
+  };
+
+  try {
+    const result = await callApiStream(mockCtx(OPENAI_CODEX_TOKEN, undefined, {
+      authorization: 'Bearer explicit-auth',
+      'ChatGPT-Account-ID': 'explicit-account',
+      'openai-beta': 'custom-beta',
+      accept: 'application/x-test-stream',
+    }), {
+      id: 'gpt-5.5',
+      provider: 'openai-codex',
+      api: 'openai-codex-responses',
+      baseUrl: 'https://chatgpt.com/backend-api',
+      reasoning: true,
+      headers: { Originator: 'custom-originator' },
+    }, { contents: [{ parts: [{ text: 'Search with Codex' }] }] });
+
+    assert.equal(result.text, 'Custom headers preserved');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('OpenAI Codex stream accepts headers-only authentication', async () => {
+  const previousFetch = globalThis.fetch;
+  let fetched = false;
+  globalThis.fetch = async (_url, init) => {
+    fetched = true;
+    assert.equal(init.headers.authorization, 'Bearer headers-only-token');
+    assert.equal(init.headers['chatgpt-account-id'], 'headers-only-account');
+    return makeResponse([
+      { data: { type: 'response.output_text.delta', delta: 'Headers-only auth accepted' } },
+      { data: { type: 'response.done', response: { output: [] } } },
+    ]);
+  };
+
+  try {
+    const result = await callApiStream(mockCtx(undefined, undefined, {
+      authorization: 'Bearer headers-only-token',
+      'ChatGPT-Account-ID': 'headers-only-account',
+    }), {
+      id: 'gpt-5.5',
+      provider: 'openai-codex',
+      api: 'openai-codex-responses',
+      baseUrl: 'https://chatgpt.com/backend-api',
+      reasoning: true,
+      headers: {},
+    }, { contents: [{ parts: [{ text: 'Search with Codex' }] }] });
+
+    assert.equal(fetched, true);
+    assert.equal(result.text, 'Headers-only auth accepted');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('OpenAI Codex stream normalizes mixed-case Authorization with auth headers winning', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    const authorizationKeys = Object.keys(init.headers).filter((key) => key.toLowerCase() === 'authorization');
+    assert.deepEqual(authorizationKeys, ['authorization']);
+    assert.equal(init.headers.authorization, 'Bearer auth-oauth-token');
+    assert.doesNotMatch(init.headers.authorization, /model-stale-token/);
+    return makeResponse([
+      { data: { type: 'response.done', response: { output: [] } } },
+    ]);
+  };
+
+  try {
+    await callApiStream(mockCtx(undefined, undefined, {
+      authorization: 'Bearer auth-oauth-token',
+      'ChatGPT-Account-ID': 'collision-account',
+    }), {
+      id: 'gpt-5.5',
+      provider: 'openai-codex',
+      api: 'openai-codex-responses',
+      baseUrl: 'https://chatgpt.com/backend-api',
+      reasoning: true,
+      headers: { Authorization: 'Bearer model-stale-token' },
+    }, { contents: [{ parts: [{ text: 'Search with Codex' }] }] });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('OpenAI Codex stream rejects missing authentication', async () => {
+  const previousFetch = globalThis.fetch;
+  let fetched = false;
+  globalThis.fetch = async () => {
+    fetched = true;
+    return makeResponse([]);
+  };
+
+  try {
+    await assert.rejects(
+      callApiStream(mockCtx(undefined), {
+        id: 'gpt-5.5',
+        provider: 'openai-codex',
+        api: 'openai-codex-responses',
+        baseUrl: 'https://chatgpt.com/backend-api',
+        reasoning: true,
+        headers: {},
+      }, { contents: [{ parts: [{ text: 'Search with Codex' }] }] }),
+      /No OAuth credential configured for openai-codex model/,
+    );
+    assert.equal(fetched, false);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('OpenAI Codex stream preserves partial results from incomplete responses', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => makeResponse([
+    { data: { type: 'response.web_search_call.in_progress', item_id: 'ws_codex_partial' } },
+    { data: { type: 'response.output_text.delta', delta: 'Partial Codex answer' } },
+    { data: { type: 'response.incomplete', response: {
+      status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens' },
+      output: [
+        { type: 'web_search_call', id: 'ws_codex_partial', status: 'completed', action: { type: 'search', query: 'partial Codex query' } },
+      ],
+    } } },
+  ]);
+
+  try {
+    const result = await callApiStream(mockCtx(OPENAI_CODEX_TOKEN), {
+      id: 'gpt-5.5',
+      provider: 'openai-codex',
+      api: 'openai-codex-responses',
+      baseUrl: 'https://chatgpt.com/backend-api',
+      reasoning: true,
+      headers: {},
+    }, { contents: [{ parts: [{ text: 'Search with Codex' }] }] });
+
+    assert.equal(result.text, 'Partial Codex answer');
+    assert.equal(result.nativeSearchCalls.length, 1);
+    assert.equal(result.nativeSearchCalls[0].status, 'completed');
+    assert.deepEqual(result.nativeSearchCalls[0].queries, ['partial Codex query']);
+    assert.deepEqual(result.searchQueries, ['partial Codex query']);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('OpenAI stream preserves partial results from incomplete responses', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => makeResponse([
+    { data: { type: 'response.web_search_call.in_progress', item_id: 'ws_partial' } },
+    { data: { type: 'response.output_text.delta', delta: 'Partial OpenAI answer' } },
+    { data: { type: 'response.incomplete', response: {
+      status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens' },
+      output: [
+        { type: 'web_search_call', id: 'ws_partial', status: 'completed', action: { type: 'search', query: 'partial query' } },
+      ],
+    } } },
+  ]);
+
+  try {
+    const result = await callApiStream(mockCtx(), {
+      id: 'gpt-test',
+      provider: 'openai',
+      api: 'openai-responses',
+      baseUrl: 'https://api.openai.com/v1',
+      reasoning: false,
+      headers: {},
+    }, { contents: [{ parts: [{ text: 'Search with OpenAI' }] }] });
+
+    assert.equal(result.text, 'Partial OpenAI answer');
+    assert.equal(result.nativeSearchCalls.length, 1);
+    assert.equal(result.nativeSearchCalls[0].status, 'completed');
+    assert.deepEqual(result.nativeSearchCalls[0].queries, ['partial query']);
+    assert.deepEqual(result.searchQueries, ['partial query']);
   } finally {
     globalThis.fetch = previousFetch;
   }
@@ -205,6 +565,26 @@ test('getModel does not fall back to another configured supported model', async 
   assert.match(result.content[0].text, /gpt-test/);
   assert.equal(result.details.error, 'unsupported_model');
   assert.deepEqual(result.details.availableSupportedModels, ['gpt-test (proxy-provider/openai-responses)']);
+});
+
+test('getModel accepts openai-codex Responses models', async () => {
+  const model = {
+    id: 'gpt-5.5',
+    provider: 'openai-codex',
+    api: 'openai-codex-responses',
+    baseUrl: 'https://chatgpt.com/backend-api',
+    headers: {},
+  };
+  const ctx = {
+    model,
+    modelRegistry: {
+      getAvailable() {
+        return [model];
+      },
+    },
+  };
+
+  assert.equal(await getModel(ctx), model);
 });
 
 test('getWebSearchModel prefers explicit config over current conversation model', async () => {
