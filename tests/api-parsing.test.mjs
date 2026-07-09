@@ -96,6 +96,36 @@ test('OpenAI stream exposes native search calls, queries, URLs, and citations', 
   }
 });
 
+test('OpenAI stream falls back to env API key when resolved auth has no credential', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousOpenAiApiKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'env-openai-key';
+  globalThis.fetch = async (_url, init) => {
+    assert.equal(init.headers.authorization, 'Bearer env-openai-key');
+    return makeResponse([
+      { data: { type: 'response.output_text.delta', delta: 'Fallback auth accepted' } },
+      { data: { type: 'response.done', response: { output: [] } } },
+    ]);
+  };
+
+  try {
+    const result = await callApiStream(mockCtx(undefined), {
+      id: 'gpt-test',
+      provider: 'openai',
+      api: 'openai-responses',
+      baseUrl: 'https://example.test/v1',
+      reasoning: false,
+      headers: {},
+    }, { contents: [{ parts: [{ text: 'Search with fallback auth' }] }] });
+
+    assert.equal(result.text, 'Fallback auth accepted');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousOpenAiApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousOpenAiApiKey;
+  }
+});
+
 test('OpenAI Codex stream uses Codex Responses transport with native web search', async () => {
   const previousFetch = globalThis.fetch;
   const tokenPayload = OPENAI_CODEX_TOKEN.split('.')[1];
@@ -487,6 +517,95 @@ test('Anthropic stream exposes server web search, result URLs, and citation deta
     assert.equal(result.sources[0].url, 'https://platform.openai.com/docs/guides/tools-web-search');
   } finally {
     globalThis.fetch = previousFetch;
+  }
+});
+
+test('Anthropic stream falls back to env API key when resolved auth has no credential', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'env-fallback-key';
+  globalThis.fetch = async (_url, init) => {
+    assert.equal(init.headers['x-api-key'], 'env-fallback-key');
+    return makeResponse([
+      { data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Fallback auth accepted' } } },
+    ]);
+  };
+
+  try {
+    const result = await callApiStream(mockCtx(undefined), {
+      id: 'claude-test',
+      provider: 'anthropic',
+      api: 'anthropic-messages',
+      baseUrl: 'https://example.test/anthropic',
+      maxTokens: 4096,
+      headers: {},
+    }, { contents: [{ parts: [{ text: 'Search with fallback auth' }] }] });
+
+    assert.equal(result.text, 'Fallback auth accepted');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousAnthropicApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousAnthropicApiKey;
+  }
+});
+
+test('Anthropic stream does not replace existing auth headers with env API key fallback', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'env-fallback-key';
+  globalThis.fetch = async (_url, init) => {
+    assert.equal(init.headers['x-api-key'], 'header-key');
+    return makeResponse([
+      { data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Header auth accepted' } } },
+    ]);
+  };
+
+  try {
+    const result = await callApiStream(mockCtx(undefined, undefined, { 'x-api-key': 'header-key' }), {
+      id: 'claude-test',
+      provider: 'anthropic',
+      api: 'anthropic-messages',
+      baseUrl: 'https://example.test/anthropic',
+      maxTokens: 4096,
+      headers: {},
+    }, { contents: [{ parts: [{ text: 'Search with header auth' }] }] });
+
+    assert.equal(result.text, 'Header auth accepted');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousAnthropicApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousAnthropicApiKey;
+  }
+});
+
+test('Google stream falls back to env API key when resolved auth has no credential', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousGeminiApiKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = 'env-gemini-key';
+  globalThis.fetch = async (_url, init) => {
+    assert.equal(init.headers['x-goog-api-key'], 'env-gemini-key');
+    return makeResponse([
+      { data: { candidates: [{ content: { parts: [{ text: 'Fallback auth accepted' }] } }] } },
+    ]);
+  };
+
+  try {
+    const result = await callApiStream(mockCtx(undefined), {
+      id: 'gemini-test',
+      provider: 'google',
+      api: 'google-generative-ai',
+      baseUrl: 'https://example.test/gemini/v1beta',
+      headers: {},
+    }, {
+      contents: [{ role: 'user', parts: [{ text: 'Search with fallback auth' }] }],
+      tools: [{ google_search: {} }],
+    });
+
+    assert.equal(result.text, 'Fallback auth accepted');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousGeminiApiKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = previousGeminiApiKey;
   }
 });
 

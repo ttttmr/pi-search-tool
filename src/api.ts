@@ -1,12 +1,13 @@
 import type { ExtensionContext, AgentToolUpdateCallback } from "@earendil-works/pi-coding-agent";
-import { type Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import { getEnvApiKey } from "@earendil-works/pi-ai/compat";
 import { TextEncoder, TextDecoder } from "util";
 
 // --- Provider Configuration ---
 
 type ProviderKind = "google" | "openai" | "anthropic" | "unsupported";
 
-type GoogleRequestBuilder = (model: Model<any>, body: any) => { url: string; headers: Record<string, string>; body: any };
+type GoogleRequestBuilder = (model: Model<Api>, body: any) => { url: string; headers: Record<string, string>; body: any };
 
 type ProviderConfig = {
     kind: ProviderKind;
@@ -31,14 +32,14 @@ const GOOGLE_PROVIDERS: Record<string, ProviderConfig> = {
     }
 };
 
-export function getProviderKind(model: Model<any>): ProviderKind {
+export function getProviderKind(model: Model<Api>): ProviderKind {
     if (GOOGLE_PROVIDERS[model.provider] || GOOGLE_PROVIDERS[model.api]) return "google";
     if (model.api === "openai-responses" || model.api === "openai-codex-responses") return "openai";
     if (model.api === "anthropic-messages") return "anthropic";
     return "unsupported";
 }
 
-export function getConfig(model: Model<any>): ProviderConfig {
+export function getConfig(model: Model<Api>): ProviderConfig {
     const googleConfig = GOOGLE_PROVIDERS[model.provider] || GOOGLE_PROVIDERS[model.api];
     if (googleConfig) return googleConfig;
     const kind = getProviderKind(model);
@@ -51,28 +52,34 @@ type ResolvedAuth =
     | { ok: true; apiKey?: string; headers?: Record<string, string>; }
     | { ok: false; error: string; };
 
+function getEnvAuth(model: Model<Api>): Extract<ResolvedAuth, { ok: true }> | undefined {
+    const apiKey = getEnvApiKey(model.provider);
+    return apiKey ? { ok: true, apiKey } : undefined;
+}
+
 /**
  * Get API key and headers for a model.
- * Compatible with both new pi versions (getApiKeyAndHeaders) and old versions (getApiKey).
  */
-async function getAuth(ctx: ExtensionContext, model: Model<any>): Promise<ResolvedAuth> {
-    const registry = ctx.modelRegistry as any;
-    
-    // Try new API first (pi >= 0.63.0)
-    if (typeof registry.getApiKeyAndHeaders === 'function') {
-        return await registry.getApiKeyAndHeaders(model);
-    }
-    
-    // Fallback to old API (pi < 0.63.0)
-    if (typeof registry.getApiKey === 'function') {
-        const apiKey = await registry.getApiKey(model);
-        if (apiKey === undefined || apiKey === null) {
-            return { ok: false, error: "No API key configured for model" };
-        }
-        return { ok: true, apiKey };
-    }
-    
-    return { ok: false, error: "Model registry does not support API key retrieval" };
+async function getAuth(ctx: ExtensionContext, model: Model<Api>): Promise<ResolvedAuth> {
+    const resolved = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+    if (!resolved.ok) return resolved;
+
+    // pi-coding-agent 0.80.1+ returns { ok: true } from getApiKeyAndHeaders()
+    // when auth only comes from provider env vars such as ANTHROPIC_API_KEY.
+    // The main agent still works because pi-ai's streamSimple() performs its own
+    // getEnvApiKey() fallback, but this extension calls fetch() directly, so it
+    // must mirror that fallback while preserving explicit model/auth headers.
+    const envAuth = !resolved.apiKey && !hasAuthHeader(resolved.headers) ? getEnvAuth(model) : undefined;
+    return envAuth ? { ...resolved, apiKey: envAuth.apiKey } : resolved;
+}
+
+function hasAuthHeader(headers?: Record<string, string>): boolean {
+    if (!headers) return false;
+    return Object.entries(headers).some(([name, value]) => {
+        if (!value) return false;
+        const normalized = name.toLowerCase();
+        return normalized === "authorization" || normalized === "x-api-key" || normalized === "x-goog-api-key";
+    });
 }
 
 // --- Streaming API Call ---
@@ -229,11 +236,11 @@ function trimTrailingSlash(value: string): string {
     return value.replace(/\/+$/, "");
 }
 
-function isOpenAICodexModel(model: Model<any>): boolean {
+function isOpenAICodexModel(model: Model<Api>): boolean {
     return model.api === "openai-codex-responses";
 }
 
-function resolveOpenAIResponsesUrl(model: Model<any>): string {
+function resolveOpenAIResponsesUrl(model: Model<Api>): string {
     const base = trimTrailingSlash(model.baseUrl);
     if (!isOpenAICodexModel(model)) return `${base}/responses`;
     if (base.endsWith("/codex/responses")) return base;
@@ -506,7 +513,7 @@ function extractGoogleSearchDetails(groundingMetadata: any): { searchQueries: st
 
 async function callGoogleStream(
     ctx: ExtensionContext,
-    model: Model<any>,
+    model: Model<Api>,
     body: any,
     onUpdate?: AgentToolUpdateCallback,
     signal?: AbortSignal
@@ -598,7 +605,7 @@ async function callGoogleStream(
 
 async function callOpenAIStream(
     ctx: ExtensionContext,
-    model: Model<any>,
+    model: Model<Api>,
     prompt: string,
     onUpdate?: AgentToolUpdateCallback,
     signal?: AbortSignal
@@ -805,7 +812,7 @@ async function callOpenAIStream(
 
 async function callAnthropicStream(
     ctx: ExtensionContext,
-    model: Model<any>,
+    model: Model<Api>,
     prompt: string,
     onUpdate?: AgentToolUpdateCallback,
     signal?: AbortSignal
@@ -971,7 +978,7 @@ async function callAnthropicStream(
 
 export async function callApiStream(
     ctx: ExtensionContext,
-    model: Model<any>,
+    model: Model<Api>,
     body: any,
     onUpdate?: AgentToolUpdateCallback,
     signal?: AbortSignal

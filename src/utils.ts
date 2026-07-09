@@ -1,5 +1,5 @@
 import type { ExtensionContext, AgentToolResult } from "@earendil-works/pi-coding-agent";
-import { type Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -26,12 +26,12 @@ type WebSearchModelConfig =
     | { status: "configured"; path: string; provider: string; modelId: string; }
     | { status: "invalid"; path: string; error: string; };
 
-function isSupportedSearchModel(model: Model<any> | undefined): model is Model<any> {
+function isSupportedSearchModel(model: Model<Api> | undefined): model is Model<Api> {
     if (!model) return false;
     return getProviderKind(model) !== "unsupported";
 }
 
-function describeModel(model: Model<any>): string {
+function describeModel(model: Model<Api>): string {
     return `${model.id} (${model.provider}/${model.api})`;
 }
 
@@ -82,13 +82,13 @@ function getAvailableSupportedModels(ctx: ExtensionContext): string[] {
     }
 }
 
-export async function getModel(ctx: ExtensionContext): Promise<Model<any> | undefined> {
+export async function getModel(ctx: ExtensionContext): Promise<Model<Api> | undefined> {
     // Only use the currently selected model. Do not silently fall back to another
     // configured model, because that can surprise users with unexpected API costs.
     return isSupportedSearchModel(ctx.model) ? ctx.model : undefined;
 }
 
-export async function getWebSearchModel(ctx: ExtensionContext): Promise<Model<any> | undefined> {
+export async function getWebSearchModel(ctx: ExtensionContext): Promise<Model<Api> | undefined> {
     const config = readWebSearchModelConfig();
     if (config.status === "invalid") return undefined;
 

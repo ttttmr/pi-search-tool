@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { type Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { getProviderKind } from "./api.ts";
 import { webSearch, WebSearchSchema } from "./web_search.ts";
 import { urlContext, UrlContextSchema } from "./url_context.ts";
@@ -7,7 +7,7 @@ import { urlContext, UrlContextSchema } from "./url_context.ts";
 const WEB_SEARCH_TOOL = "web_search";
 const URL_CONTEXT_TOOL = "url_context";
 
-function supportsUrlContext(model: Model<any> | undefined) {
+function supportsUrlContext(model: Model<Api> | undefined) {
     return !!model && getProviderKind(model) === "google";
 }
 
@@ -24,7 +24,7 @@ export function createModelScopedToolManager(pi: Pick<ExtensionAPI, "getActiveTo
     let lastAppliedActiveTools: Set<string> | undefined;
     let suppressedTools = new Set<string>();
 
-    const sync = (model: Model<any> | undefined) => {
+    const sync = (model: Model<Api> | undefined) => {
         const currentActiveTools = new Set(pi.getActiveTools());
 
         if (!preferredActiveTools) {
