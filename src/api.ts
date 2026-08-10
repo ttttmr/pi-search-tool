@@ -49,7 +49,7 @@ export function getConfig(model: Model<Api>): ProviderConfig {
 // --- Auth Compatibility Layer ---
 
 type ResolvedAuth = 
-    | { ok: true; apiKey?: string; headers?: Record<string, string>; }
+    | { ok: true; apiKey?: string; headers?: Record<string, string>; baseUrl?: string; }
     | { ok: false; error: string; };
 
 function getEnvAuth(model: Model<Api>): Extract<ResolvedAuth, { ok: true }> | undefined {
@@ -240,8 +240,47 @@ function isOpenAICodexModel(model: Model<Api>): boolean {
     return model.api === "openai-codex-responses";
 }
 
-function resolveOpenAIResponsesUrl(model: Model<Api>): string {
-    const base = trimTrailingSlash(model.baseUrl);
+function resolveGitHubCopilotBaseUrl(
+    model: Model<Api>,
+    auth: Extract<ResolvedAuth, { ok: true }>,
+): string {
+    if (model.provider !== "github-copilot") return model.baseUrl;
+
+    // Modern pi versions expose the credential-specific Copilot endpoint
+    // resolved by the provider. Prefer it so GitHub Enterprise Server and any
+    // future provider-owned routing continue to work without token parsing here.
+    if (typeof auth.baseUrl === "string" && auth.baseUrl.trim()) {
+        return auth.baseUrl;
+    }
+
+    // Compatibility fallback for older pi versions whose extension auth API
+    // returned the Copilot token but not its resolved base URL.
+    if (!auth.apiKey) return model.baseUrl;
+    const proxyEndpoints = auth.apiKey
+        .split(";")
+        .filter((field) => field.startsWith("proxy-ep="))
+        .map((field) => field.slice("proxy-ep=".length));
+    if (proxyEndpoints.length !== 1) return model.baseUrl;
+
+    const proxyHost = proxyEndpoints[0].toLowerCase();
+    const labels = proxyHost.split(".");
+    const isValidLabel = (label: string) =>
+        label.length > 0
+        && label.length <= 63
+        && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label);
+    const isCopilotProxyHost = proxyHost.length <= 253
+        && labels.length >= 4
+        && labels[0] === "proxy"
+        && labels.at(-2) === "githubcopilot"
+        && labels.at(-1) === "com"
+        && labels.every(isValidLabel);
+    if (!isCopilotProxyHost) return model.baseUrl;
+
+    return `https://api.${labels.slice(1).join(".")}`;
+}
+
+function resolveOpenAIResponsesUrl(model: Model<Api>, baseUrl = model.baseUrl): string {
+    const base = trimTrailingSlash(baseUrl);
     if (!isOpenAICodexModel(model)) return `${base}/responses`;
     if (base.endsWith("/codex/responses")) return base;
     if (base.endsWith("/codex")) return `${base}/responses`;
@@ -661,7 +700,8 @@ async function callOpenAIStream(
         requestBody.parallel_tool_calls = true;
     }
 
-    const response = await fetch(resolveOpenAIResponsesUrl(model), {
+    const baseUrl = resolveGitHubCopilotBaseUrl(model, auth);
+    const response = await fetch(resolveOpenAIResponsesUrl(model, baseUrl), {
         method: "POST",
         headers: requestHeaders,
         body: JSON.stringify(requestBody),

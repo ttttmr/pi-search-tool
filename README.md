@@ -15,6 +15,8 @@ Search the web using your currently selected model. Automatically picks the righ
 | OpenAI Codex | Codex Responses API web search |
 | Anthropic | Messages API web search |
 
+GitHub Copilot OpenAI Responses models are supported, including Business and Enterprise seats whose API endpoint is resolved from their authenticated Copilot credentials. This includes models such as `gpt-5.6-sol`.
+
 Supports passing up to 20 additional URLs to analyze alongside the query.
 
 ### `url_context`
