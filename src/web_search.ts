@@ -10,13 +10,22 @@ export const WebSearchSchema = Type.Object({
         description: "Additional URLs to analyze along with search (up to 20)",
         maxItems: 20
     })),
-    depth: Type.Optional(StringEnum(["quick", "standard", "deep"] as const, {
-        description: "Research depth. quick is a simple lookup, standard is the default balanced search, and deep performs more thorough multi-source research.",
-        default: "standard"
-    })),
+    depth: StringEnum(["quick", "standard", "deep"] as const, {
+        description: "Research depth. Use quick for simple lookups, standard for normal searches, and deep for product research, multi-source comparisons, or thorough investigations."
+    }),
 });
 export type WebSearchInput = Static<typeof WebSearchSchema>;
-export type SearchDepth = NonNullable<WebSearchInput["depth"]>;
+export type SearchDepth = WebSearchInput["depth"];
+
+export function prepareWebSearchArguments(args: unknown): WebSearchInput {
+    const input = args && typeof args === "object" && !Array.isArray(args)
+        ? args as Record<string, unknown>
+        : {};
+    return {
+        ...input,
+        depth: input.depth === undefined ? "standard" : input.depth,
+    } as WebSearchInput;
+}
 
 export interface SearchDepthSettings {
     depth: SearchDepth;

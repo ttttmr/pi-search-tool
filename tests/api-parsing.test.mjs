@@ -7,7 +7,7 @@ import { callApiStream } from '../src/api.ts';
 import { createModelScopedToolManager } from '../src/index.ts';
 import { getModel, getWebSearchModel, missingConfigResult, missingWebSearchConfigResult } from '../src/utils.ts';
 import { urlContext } from '../src/url_context.ts';
-import { getSearchDepthSettings, webSearch } from '../src/web_search.ts';
+import { getSearchDepthSettings, prepareWebSearchArguments, webSearch } from '../src/web_search.ts';
 
 const OPENAI_CODEX_TOKEN = [
   'eyJhbGciOiJub25lIn0',
@@ -43,6 +43,17 @@ function makeResponse(events) {
     headers: { 'content-type': 'text/event-stream' },
   });
 }
+
+test('legacy web_search calls without depth are prepared as standard searches', () => {
+  assert.deepEqual(
+    prepareWebSearchArguments({ query: 'legacy search' }),
+    { query: 'legacy search', depth: 'standard' },
+  );
+  assert.deepEqual(
+    prepareWebSearchArguments({ query: 'deep search', depth: 'deep' }),
+    { query: 'deep search', depth: 'deep' },
+  );
+});
 
 test('search depth maps to adaptive reasoning effort with standard as the default', () => {
   assert.deepEqual(

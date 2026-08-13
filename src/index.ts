@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getProviderKind } from "./api.ts";
-import { webSearch, WebSearchSchema } from "./web_search.ts";
+import { prepareWebSearchArguments, webSearch, WebSearchSchema } from "./web_search.ts";
 import { urlContext, UrlContextSchema } from "./url_context.ts";
 
 const WEB_SEARCH_TOOL = "web_search";
@@ -67,6 +67,7 @@ export default function (pi: ExtensionAPI) {
             "For web_search, use depth quick for simple lookups, standard for normal searches, and deep for product research, multi-source comparisons, or other thorough investigations."
         ],
         parameters: WebSearchSchema,
+        prepareArguments: prepareWebSearchArguments,
         execute: webSearch
     });
 
