@@ -15,7 +15,15 @@ Search the web using your currently selected model. Automatically picks the righ
 | OpenAI Codex | Codex Responses API web search |
 | Anthropic | Messages API web search |
 
-Supports passing up to 20 additional URLs to analyze alongside the query.
+Supports passing up to 20 additional URLs to analyze alongside the query. The optional `depth` parameter adapts research thoroughness and OpenAI/Codex reasoning effort:
+
+| Depth | OpenAI/Codex reasoning effort | Use case |
+|---|---|---|
+| `quick` | `none` | Simple lookups |
+| `standard` (default) | `low` | Normal searches |
+| `deep` | `medium` | Product research, multi-source comparisons, and thorough investigations |
+
+The depth guidance is included in the search prompt for every provider. Reasoning effort is currently applied only to reasoning-capable OpenAI/Codex models.
 
 ### `url_context`
 

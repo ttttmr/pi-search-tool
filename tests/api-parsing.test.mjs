@@ -7,7 +7,7 @@ import { callApiStream } from '../src/api.ts';
 import { createModelScopedToolManager } from '../src/index.ts';
 import { getModel, getWebSearchModel, missingConfigResult, missingWebSearchConfigResult } from '../src/utils.ts';
 import { urlContext } from '../src/url_context.ts';
-import { webSearch } from '../src/web_search.ts';
+import { getSearchDepthSettings, webSearch } from '../src/web_search.ts';
 
 const OPENAI_CODEX_TOKEN = [
   'eyJhbGciOiJub25lIn0',
@@ -43,6 +43,21 @@ function makeResponse(events) {
     headers: { 'content-type': 'text/event-stream' },
   });
 }
+
+test('search depth maps to adaptive reasoning effort with standard as the default', () => {
+  assert.deepEqual(
+    { ...getSearchDepthSettings('quick'), instruction: undefined },
+    { depth: 'quick', reasoningEffort: 'none', instruction: undefined },
+  );
+  assert.deepEqual(
+    { ...getSearchDepthSettings(undefined), instruction: undefined },
+    { depth: 'standard', reasoningEffort: 'low', instruction: undefined },
+  );
+  assert.deepEqual(
+    { ...getSearchDepthSettings('deep'), instruction: undefined },
+    { depth: 'deep', reasoningEffort: 'medium', instruction: undefined },
+  );
+});
 
 test('OpenAI stream exposes native search calls, queries, URLs, and citations', async () => {
   const previousFetch = globalThis.fetch;
@@ -148,6 +163,7 @@ test('OpenAI Codex stream uses Codex Responses transport with native web search'
     assert.deepEqual(body.include, ['web_search_call.action.sources']);
     assert.equal(body.tool_choice, 'required');
     assert.equal(body.parallel_tool_calls, true);
+    assert.deepEqual(body.reasoning, { effort: 'none' });
     assert.equal(body.stream, true);
     assert.equal(body.store, false);
 
@@ -178,6 +194,35 @@ test('OpenAI Codex stream uses Codex Responses transport with native web search'
     assert.equal(result.nativeSearchCalls.length, 1);
     assert.equal(result.nativeSearchCalls[0].status, 'completed');
     assert.deepEqual(result.nativeSearchCalls[0].queries, ['Codex web search']);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('OpenAI Codex stream honors requested reasoning effort', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    assert.deepEqual(body.reasoning, { effort: 'medium' });
+    return makeResponse([
+      { data: { type: 'response.output_text.delta', delta: 'Deep search answer' } },
+      { data: { type: 'response.done', response: { output: [] } } },
+    ]);
+  };
+
+  try {
+    const result = await callApiStream(mockCtx(OPENAI_CODEX_TOKEN), {
+      id: 'gpt-5.6-terra',
+      provider: 'openai-codex',
+      api: 'openai-codex-responses',
+      baseUrl: 'https://chatgpt.com/backend-api',
+      reasoning: true,
+      headers: {},
+    }, { contents: [{ parts: [{ text: 'Deep product research' }] }] }, undefined, undefined, {
+      reasoningEffort: 'medium',
+    });
+
+    assert.equal(result.text, 'Deep search answer');
   } finally {
     globalThis.fetch = previousFetch;
   }

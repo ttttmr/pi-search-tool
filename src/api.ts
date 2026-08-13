@@ -7,6 +7,12 @@ import { TextEncoder, TextDecoder } from "util";
 
 type ProviderKind = "google" | "openai" | "anthropic" | "unsupported";
 
+export type OpenAIReasoningEffort = "none" | "low" | "medium";
+
+export interface CallApiStreamOptions {
+    reasoningEffort?: OpenAIReasoningEffort;
+}
+
 type GoogleRequestBuilder = (model: Model<Api>, body: any) => { url: string; headers: Record<string, string>; body: any };
 
 type ProviderConfig = {
@@ -608,7 +614,8 @@ async function callOpenAIStream(
     model: Model<Api>,
     prompt: string,
     onUpdate?: AgentToolUpdateCallback,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options?: CallApiStreamOptions
 ): Promise<StreamResult> {
     const auth = await getAuth(ctx, model);
     if (!auth.ok) {
@@ -652,7 +659,7 @@ async function callOpenAIStream(
         store: false,
     };
     if (model.reasoning) {
-        requestBody.reasoning = { effort: "none" };
+        requestBody.reasoning = { effort: options?.reasoningEffort ?? "none" };
     }
     if (isCodex) {
         requestBody.instructions = "Answer the user's request using web search when needed.";
@@ -981,7 +988,8 @@ export async function callApiStream(
     model: Model<Api>,
     body: any,
     onUpdate?: AgentToolUpdateCallback,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options?: CallApiStreamOptions
 ): Promise<StreamResult> {
     const kind = getProviderKind(model);
     if (kind === "google") {
@@ -994,7 +1002,7 @@ export async function callApiStream(
     }
 
     if (kind === "openai") {
-        return callOpenAIStream(ctx, model, prompt, onUpdate, signal);
+        return callOpenAIStream(ctx, model, prompt, onUpdate, signal, options);
     }
     if (kind === "anthropic") {
         return callAnthropicStream(ctx, model, prompt, onUpdate, signal);

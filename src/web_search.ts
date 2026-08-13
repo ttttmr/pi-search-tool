@@ -1,6 +1,7 @@
 import type { ExtensionContext, AgentToolUpdateCallback } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
-import { callApiStream, getConfig, applyCitations } from "./api.ts";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { callApiStream, getConfig, applyCitations, type OpenAIReasoningEffort } from "./api.ts";
 import { getWebSearchModel, missingWebSearchConfigResult, errorResult, formatResult } from "./utils.ts";
 
 export const WebSearchSchema = Type.Object({
@@ -9,8 +10,42 @@ export const WebSearchSchema = Type.Object({
         description: "Additional URLs to analyze along with search (up to 20)",
         maxItems: 20
     })),
+    depth: Type.Optional(StringEnum(["quick", "standard", "deep"] as const, {
+        description: "Research depth. quick is a simple lookup, standard is the default balanced search, and deep performs more thorough multi-source research.",
+        default: "standard"
+    })),
 });
 export type WebSearchInput = Static<typeof WebSearchSchema>;
+export type SearchDepth = NonNullable<WebSearchInput["depth"]>;
+
+export interface SearchDepthSettings {
+    depth: SearchDepth;
+    reasoningEffort: OpenAIReasoningEffort;
+    instruction: string;
+}
+
+export function getSearchDepthSettings(depth: WebSearchInput["depth"]): SearchDepthSettings {
+    switch (depth ?? "standard") {
+        case "quick":
+            return {
+                depth: "quick",
+                reasoningEffort: "none",
+                instruction: "Perform a concise lookup using the minimum search needed to answer accurately. Prefer a primary source when available."
+            };
+        case "deep":
+            return {
+                depth: "deep",
+                reasoningEffort: "medium",
+                instruction: "Conduct thorough multi-source research. Prioritize primary sources, compare conflicting evidence, and clearly distinguish verified facts from uncertainty."
+            };
+        default:
+            return {
+                depth: "standard",
+                reasoningEffort: "low",
+                instruction: "Perform a balanced search using authoritative sources and verify important claims across sources when practical."
+            };
+    }
+}
 
 export async function webSearch(
     id: string, 
@@ -24,6 +59,7 @@ export async function webSearch(
 
     const hasUrls = params.urls && params.urls.length > 0;
     const urlCount = hasUrls ? params.urls!.length : 0;
+    const depthSettings = getSearchDepthSettings(params.depth);
     
     onUpdate?.({ 
         content: [{ 
@@ -39,9 +75,10 @@ export async function webSearch(
         const config = getConfig(model);
         
         // Build prompt: include URLs if provided
-        const prompt = hasUrls
+        const request = hasUrls
             ? `${params.query}\n\nAlso analyze these URLs:\n${params.urls!.join("\n")}`
             : params.query;
+        const prompt = `${request}\n\nResearch guidance: ${depthSettings.instruction}`;
 
         // Enable provider-native search tools. Google needs explicit Gemini tool names;
         // OpenAI/Anthropic are handled inside callApiStream based on the current model.
@@ -54,7 +91,7 @@ export async function webSearch(
         const result = await callApiStream(ctx, model, {
             contents: [{ role: "user", parts: [{ text: prompt }] }],
             ...(tools ? { tools } : {})
-        }, onUpdate, signal);
+        }, onUpdate, signal, { reasoningEffort: depthSettings.reasoningEffort });
 
         const cited = applyCitations(result.text, result.groundingMetadata);
         const text = cited.text;
@@ -114,6 +151,8 @@ export async function webSearch(
             retrieved: retrieved.length > 0 ? retrieved : undefined,
             failed: failed.length > 0 ? failed : undefined,
             model: model.id,
+            depth: depthSettings.depth,
+            reasoningEffort: depthSettings.reasoningEffort,
             grounded: sources.length > 0 || (result.searchResults?.length || 0) > 0,
             resultCount: result.searchResults?.length || sources.length
         });

@@ -62,7 +62,10 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool({
         name: WEB_SEARCH_TOOL,
         label: "Web Search",
-        description: "Search the web using the current supported provider (Google Gemini, OpenAI, or Anthropic). Optionally include URLs to analyze alongside search results.",
+        description: "Search the web using the current supported provider (Google Gemini, OpenAI, or Anthropic). Optionally include URLs and choose quick, standard, or deep research depth.",
+        promptGuidelines: [
+            "For web_search, use depth quick for simple lookups, standard for normal searches, and deep for product research, multi-source comparisons, or other thorough investigations."
+        ],
         parameters: WebSearchSchema,
         execute: webSearch
     });
