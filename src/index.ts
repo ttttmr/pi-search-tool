@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { Text } from "@earendil-works/pi-tui";
 import { getProviderKind } from "./api.ts";
 import { webSearch, WebSearchSchema } from "./web_search.ts";
 import { urlContext, UrlContextSchema } from "./url_context.ts";
@@ -64,7 +65,28 @@ export default function (pi: ExtensionAPI) {
         label: "Web Search",
         description: "Search the web using the current supported provider (Google Gemini, OpenAI, or Anthropic). Optionally include URLs to analyze alongside search results.",
         parameters: WebSearchSchema,
-        execute: webSearch
+        execute: webSearch,
+        renderCall(args, theme) {
+            const query = args.query || "…";
+            const urlCount = args.urls?.length ?? 0;
+            const urls = urlCount > 0 ? theme.fg("muted", ` + ${urlCount} URL${urlCount === 1 ? "" : "s"}`) : "";
+            return new Text(
+                `${theme.fg("toolTitle", theme.bold("web_search"))} ${theme.fg("accent", query)}${urls}`,
+                0,
+                0,
+            );
+        },
+        renderResult(result, { expanded }, theme) {
+            const output = result.content
+                .filter((part) => part.type === "text")
+                .map((part) => part.text)
+                .join("\n");
+
+            const isError = Boolean(result.details?.error);
+            if (!expanded && !isError) return new Text("", 0, 0);
+
+            return new Text(theme.fg(isError ? "error" : "toolOutput", output), 0, 0);
+        }
     });
 
     pi.registerTool({
