@@ -5,7 +5,7 @@ import { TextEncoder, TextDecoder } from "util";
 
 // --- Provider Configuration ---
 
-type ProviderKind = "google" | "openai" | "anthropic" | "unsupported";
+type ProviderKind = "google" | "openai" | "deepseek" | "anthropic" | "unsupported";
 
 type GoogleRequestBuilder = (model: Model<Api>, body: any) => { url: string; headers: Record<string, string>; body: any };
 
@@ -32,8 +32,24 @@ const GOOGLE_PROVIDERS: Record<string, ProviderConfig> = {
     }
 };
 
+/**
+ * DeepSeek exposes a server-side web search tool through its Responses API.
+ * Pi's built-in DeepSeek models report `api: "openai-completions"`, so they
+ * cannot be recognized by the `api` field alone. Match on the model id leaf
+ * only, never on the provider name: the same DeepSeek models are hosted by
+ * `deepseek`, `opencode-go`, `opencode`, `openrouter`, etc., each with its
+ * own endpoint, and router providers may use provider-qualified ids
+ * (e.g. `deepseek/deepseek-v4-flash`).
+ */
+export function isDeepSeekResponsesModel(model: Model<Api>): boolean {
+    const id = String(model.id).toLowerCase();
+    const leaf = id.slice(id.lastIndexOf("/") + 1);
+    return leaf.startsWith("deepseek");
+}
+
 export function getProviderKind(model: Model<Api>): ProviderKind {
     if (GOOGLE_PROVIDERS[model.provider] || GOOGLE_PROVIDERS[model.api]) return "google";
+    if (isDeepSeekResponsesModel(model)) return "deepseek";
     if (model.api === "openai-responses" || model.api === "openai-codex-responses") return "openai";
     if (model.api === "anthropic-messages") return "anthropic";
     return "unsupported";
@@ -850,6 +866,157 @@ async function callOpenAIStream(
     };
 }
 
+async function callDeepSeekStream(
+    ctx: ExtensionContext,
+    model: Model<Api>,
+    prompt: string,
+    onUpdate?: AgentToolUpdateCallback,
+    signal?: AbortSignal
+): Promise<StreamResult> {
+    const auth = await getAuth(ctx, model);
+    if (!auth.ok) {
+        throw new Error(auth.error || "Failed to get API key and headers");
+    }
+
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(model.headers || {})) headers.set(name, value);
+    for (const [name, value] of Object.entries(auth.headers || {})) headers.set(name, value);
+    if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    if (!headers.has("Accept")) headers.set("Accept", "text/event-stream");
+    if (auth.apiKey && !headers.has("Authorization")) headers.set("Authorization", `Bearer ${auth.apiKey}`);
+    const requestHeaders = Object.fromEntries(headers.entries());
+
+    // DeepSeek's Responses request mirrors OpenAI, minus OpenAI-specific fields
+    // (no `include`, no Codex/Copilot transport bits). Leave `tool_choice` as
+    // auto so the model decides when a search is genuinely useful.
+    const requestBody: any = {
+        model: model.id,
+        input: prompt,
+        tools: [{ type: "web_search" }],
+        stream: true,
+        store: false,
+    };
+    if (model.reasoning) {
+        requestBody.reasoning = { effort: "none" };
+    }
+
+    const response = await fetch(resolveOpenAIResponsesUrl(model, model.baseUrl), {
+        method: "POST",
+        headers: requestHeaders,
+        body: JSON.stringify(requestBody),
+        signal
+    });
+
+    if (!response.ok) {
+        throw new Error(`DeepSeek API error (${response.status}): ${await response.text()}`);
+    }
+
+    let accumulatedText = "";
+    const nativeSearchEvents: string[] = [];
+    const nativeSearchCalls: NativeSearchCallDetail[] = [];
+    const searchQueries: string[] = [];
+    const searchResults: SearchResultDetail[] = [];
+
+    const collectWebSearchCall = (item: any) => {
+        if (item?.type !== "web_search_call") return;
+        const action = item.action || {};
+        const call: NativeSearchCallDetail = {
+            id: item.id,
+            provider: "deepseek",
+            status: item.status,
+            actionType: action.type,
+            raw: item,
+        };
+        if (Array.isArray(action.queries)) {
+            const queries = action.queries.filter((query: any): query is string => typeof query === "string");
+            call.queries = queries;
+            for (const query of queries) pushUniqueString(searchQueries, query);
+        } else if (typeof action.query === "string") {
+            call.queries = [action.query];
+            pushUniqueString(searchQueries, action.query);
+        }
+        if (Array.isArray(action.sources)) {
+            call.urls = action.sources.map((source: any) => source?.url).filter((url: any): url is string => typeof url === "string");
+            for (const source of action.sources) {
+                if (!source?.url) continue;
+                pushUniqueSearchResult(searchResults, {
+                    title: source.title || source.display_name || source.name || titleFromUrl(source.url),
+                    url: source.url,
+                    source: "deepseek.web_search_call.action.sources",
+                    type: source.type || "url",
+                    raw: source,
+                });
+            }
+        }
+        if (action.url) {
+            call.urls = [...(call.urls || []), action.url];
+            pushUniqueSearchResult(searchResults, {
+                title: titleFromUrl(action.url),
+                url: action.url,
+                source: `deepseek.web_search_call.action.${action.type}`,
+                type: action.type,
+                raw: action,
+            });
+        }
+        const existingCall = call.id ? nativeSearchCalls.find((existing) => existing.id === call.id) : undefined;
+        if (existingCall) {
+            Object.assign(existingCall, Object.fromEntries(
+                Object.entries(call).filter(([, value]) => value !== undefined)
+            ));
+        } else {
+            nativeSearchCalls.push(call);
+        }
+    };
+
+    const collectFromResponse = (response: any) => {
+        for (const item of response?.output || []) collectWebSearchCall(item);
+    };
+
+    await readSseEvents(response, signal, ({ data: event }) => {
+        if (event.type === "error" || event.type === "response.failed") {
+            const message = event.message || event.error?.message || event.response?.error?.message;
+            throw new Error(message || JSON.stringify(event.error || event.response?.error || event));
+        } else if (event.type === "response.output_text.delta") {
+            accumulatedText += event.delta || "";
+            onUpdate?.({
+                content: [{ type: "text", text: accumulatedText }],
+                details: { streaming: true }
+            });
+        } else if (event.type === "response.output_item.added" || event.type === "response.output_item.done") {
+            collectWebSearchCall(event.item);
+        } else if (event.type === "response.incomplete" || event.response?.status === "incomplete") {
+            collectFromResponse(event.response);
+        } else if (event.type === "response.completed" || event.type === "response.done") {
+            collectFromResponse(event.response);
+        } else if (event.type === "response.web_search_call.in_progress" || event.type === "response.web_search_call.searching" || event.type === "response.web_search_call.completed") {
+            pushNativeSearchEvent(nativeSearchEvents, event.type);
+            const call = nativeSearchCalls.find((item) => item.id === event.item_id);
+            if (call) call.status = event.type.replace("response.web_search_call.", "");
+            else nativeSearchCalls.push({ id: event.item_id, provider: "deepseek", status: event.type.replace("response.web_search_call.", ""), raw: event });
+            if (event.type === "response.web_search_call.searching") {
+                onUpdate?.({
+                    content: [{ type: "text", text: accumulatedText || "Searching the web with DeepSeek..." }],
+                    details: { streaming: true, searching: true }
+                });
+            }
+        }
+    });
+
+    const sanitizedSearchResults = sanitizeSearchResults(searchResults);
+
+    return {
+        text: accumulatedText || "No answer available.",
+        sources: deriveSources(sanitizedSearchResults, []),
+        providerKind: "deepseek",
+        nativeSearchUsed: nativeSearchEvents.length > 0 || nativeSearchCalls.length > 0 || sanitizedSearchResults.length > 0,
+        nativeSearchEvents,
+        nativeSearchCalls,
+        searchQueries,
+        searchResults: sanitizedSearchResults,
+        citations: [],
+    };
+}
+
 async function callAnthropicStream(
     ctx: ExtensionContext,
     model: Model<Api>,
@@ -1035,6 +1202,9 @@ export async function callApiStream(
 
     if (kind === "openai") {
         return callOpenAIStream(ctx, model, prompt, onUpdate, signal);
+    }
+    if (kind === "deepseek") {
+        return callDeepSeekStream(ctx, model, prompt, onUpdate, signal);
     }
     if (kind === "anthropic") {
         return callAnthropicStream(ctx, model, prompt, onUpdate, signal);

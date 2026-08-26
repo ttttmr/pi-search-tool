@@ -603,6 +603,136 @@ test('OpenAI stream preserves partial results from incomplete responses', async 
   }
 });
 
+test('DeepSeek stream routes pi built-in models to the inherited Responses endpoint', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    // The modeled opencode-go provider serves DeepSeek models from its own endpoint.
+    assert.equal(url, 'https://opencode.ai/zen/go/v1/responses');
+    assert.equal(init.headers.authorization, 'Bearer test-key');
+    const body = JSON.parse(init.body);
+    assert.equal(body.model, 'deepseek-v4-flash');
+    assert.deepEqual(body.tools, [{ type: 'web_search' }]);
+    assert.equal(body.include, undefined);
+    assert.equal(body.stream, true);
+    return makeResponse([
+      { data: { type: 'response.web_search_call.in_progress', item_id: 'ws_deepseek' } },
+      { data: { type: 'response.web_search_call.searching', item_id: 'ws_deepseek' } },
+      { data: { type: 'response.output_item.added', item: { type: 'web_search_call', id: 'ws_deepseek', status: 'searching', action: { type: 'search', query: 'DeepSeek docs', queries: ['DeepSeek docs'], url: 'https://api-docs.deepseek.com' } } } },
+      { data: { type: 'response.output_text.delta', delta: 'DeepSeek supports server-side web search' } },
+      { data: { type: 'response.web_search_call.completed', item_id: 'ws_deepseek' } },
+      { data: { type: 'response.completed', response: { output: [
+        { type: 'web_search_call', id: 'ws_deepseek', status: 'completed', action: { type: 'search', queries: ['DeepSeek docs'], url: 'https://api-docs.deepseek.com' } },
+        { type: 'message', content: [{ type: 'output_text', text: 'DeepSeek supports server-side web search' }] },
+      ] } } },
+    ]);
+  };
+
+  try {
+    const result = await callApiStream(mockCtx(), {
+      id: 'deepseek-v4-flash',
+      provider: 'opencode-go',
+      api: 'openai-completions',
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+      reasoning: false,
+      headers: {},
+    }, { contents: [{ parts: [{ text: 'Search DeepSeek docs' }] }] });
+
+    assert.equal(result.providerKind, 'deepseek');
+    assert.equal(result.nativeSearchUsed, true);
+    assert.deepEqual(result.nativeSearchEvents, [
+      'response.web_search_call.in_progress',
+      'response.web_search_call.searching',
+      'response.web_search_call.completed',
+    ]);
+    assert.deepEqual(result.searchQueries, ['DeepSeek docs']);
+    assert.equal(result.text, 'DeepSeek supports server-side web search');
+    assert.ok(result.sources.some((s) => s.url.replace(/\/$/, '') === 'https://api-docs.deepseek.com'));
+    assert.equal(result.nativeSearchCalls[0].provider, 'deepseek');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('DeepSeek stream matches models by id leaf across hosting providers', async () => {
+  const previousFetch = globalThis.fetch;
+  const requestedUrls = [];
+  globalThis.fetch = async (url) => {
+    requestedUrls.push(url);
+    return makeResponse([
+      { data: { type: 'response.output_text.delta', delta: 'ok' } },
+      { data: { type: 'response.done', response: { output: [] } } },
+    ]);
+  };
+
+  const hosts = [
+    { provider: 'deepseek', baseUrl: 'https://api.deepseek.com' },
+    { provider: 'opencode', baseUrl: 'https://opencode.ai/zen/v1' },
+    { provider: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1' },
+  ];
+
+  try {
+    for (const host of hosts) {
+      await callApiStream(mockCtx(), {
+        id: 'deepseek-v4-pro',
+        provider: host.provider,
+        api: 'openai-completions',
+        baseUrl: host.baseUrl,
+        reasoning: false,
+        headers: {},
+      }, { contents: [{ parts: [{ text: 'Search' }] }] });
+    }
+    // provider-qualified id (router-style) must match too
+    await callApiStream(mockCtx(), {
+      id: 'deepseek/deepseek-v4-flash',
+      provider: 'openrouter',
+      api: 'openai-completions',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      reasoning: false,
+      headers: {},
+    }, { contents: [{ parts: [{ text: 'Search' }] }] });
+
+    assert.deepEqual(requestedUrls, [
+      'https://api.deepseek.com/responses',
+      'https://opencode.ai/zen/v1/responses',
+      'https://openrouter.ai/api/v1/responses',
+      'https://openrouter.ai/api/v1/responses',
+    ]);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('DeepSeek stream falls back to env API key when resolved auth has no credential', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousOpenCodeApiKey = process.env.OPENCODE_API_KEY;
+  process.env.OPENCODE_API_KEY = 'env-opencode-key';
+  globalThis.fetch = async (_url, init) => {
+    assert.equal(init.headers.authorization, 'Bearer env-opencode-key');
+    return makeResponse([
+      { data: { type: 'response.output_text.delta', delta: 'DeepSeek env auth accepted' } },
+      { data: { type: 'response.done', response: { output: [] } } },
+    ]);
+  };
+
+  try {
+    const result = await callApiStream(mockCtx(undefined), {
+      id: 'deepseek-v4-flash',
+      provider: 'opencode-go',
+      api: 'openai-completions',
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+      reasoning: false,
+      headers: {},
+    }, { contents: [{ parts: [{ text: 'Search DeepSeek docs' }] }] });
+
+    assert.equal(result.providerKind, 'deepseek');
+    assert.equal(result.text, 'DeepSeek env auth accepted');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousOpenCodeApiKey === undefined) delete process.env.OPENCODE_API_KEY;
+    else process.env.OPENCODE_API_KEY = previousOpenCodeApiKey;
+  }
+});
+
 test('Anthropic stream exposes server web search, result URLs, and citation details', async () => {
   const previousFetch = globalThis.fetch;
   globalThis.fetch = async (_url, init) => {

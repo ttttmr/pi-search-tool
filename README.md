@@ -1,6 +1,6 @@
 # pi-web-search
 
-Provider-native web search for [pi](https://github.com/earendil-works/pi-coding-agent), across Google Gemini, OpenAI, and Anthropic, plus Gemini-only URL Context analysis.
+Provider-native web search for [pi](https://github.com/earendil-works/pi-coding-agent), across Google Gemini, OpenAI, Anthropic, and DeepSeek, plus Gemini-only URL Context analysis.
 
 ## Tools
 
@@ -14,6 +14,7 @@ Search the web using your currently selected model. Automatically picks the righ
 | OpenAI | Responses API web search |
 | OpenAI Codex | Codex Responses API web search |
 | Anthropic | Messages API web search |
+| DeepSeek | Responses API web search |
 
 GitHub Copilot OpenAI Responses models are supported, including Business and Enterprise seats whose API endpoint is resolved from their authenticated Copilot credentials. This includes models such as `gpt-5.6-sol`.
 
