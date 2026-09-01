@@ -168,6 +168,33 @@ test('non-Copilot Responses ignores proxy endpoint text in its API key', async (
   }
 });
 
+test('Azure OpenAI Responses appends /responses to the configured Azure v1 base URL', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    assert.equal(url, 'https://example-resource.cognitiveservices.azure.com/openai/v1/responses');
+    assert.equal(init.headers.authorization, 'Bearer entra-token');
+    const body = JSON.parse(init.body);
+    assert.equal(body.model, 'gpt-5.6-terra');
+    assert.deepEqual(body.tools, [{ type: 'web_search' }]);
+    return makeMinimalOpenAIResponse();
+  };
+
+  try {
+    const result = await callApiStream(mockCtx('entra-token'), {
+      id: 'gpt-5.6-terra',
+      provider: 'azure-openai',
+      api: 'azure-openai-responses',
+      baseUrl: 'https://example-resource.cognitiveservices.azure.com/openai/v1/',
+      reasoning: false,
+      headers: {},
+    }, { contents: [{ parts: [{ text: 'Search with Azure OpenAI' }] }] });
+
+    assert.equal(result.providerKind, 'openai');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test('OpenAI stream exposes native search calls, queries, URLs, and citations', async () => {
   const previousFetch = globalThis.fetch;
   globalThis.fetch = async (_url, init) => {
@@ -808,6 +835,26 @@ test('getModel does not fall back to another configured supported model', async 
   assert.match(result.content[0].text, /gpt-test/);
   assert.equal(result.details.error, 'unsupported_model');
   assert.deepEqual(result.details.availableSupportedModels, ['gpt-test (proxy-provider/openai-responses)']);
+});
+
+test('getModel accepts Azure OpenAI Responses models', async () => {
+  const model = {
+    id: 'gpt-5.6-terra',
+    provider: 'azure-openai',
+    api: 'azure-openai-responses',
+    baseUrl: 'https://example-resource.cognitiveservices.azure.com/openai/v1',
+    headers: {},
+  };
+  const ctx = {
+    model,
+    modelRegistry: {
+      getAvailable() {
+        return [model];
+      },
+    },
+  };
+
+  assert.equal(await getModel(ctx), model);
 });
 
 test('getModel accepts openai-codex Responses models', async () => {

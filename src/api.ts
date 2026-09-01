@@ -34,7 +34,11 @@ const GOOGLE_PROVIDERS: Record<string, ProviderConfig> = {
 
 export function getProviderKind(model: Model<Api>): ProviderKind {
     if (GOOGLE_PROVIDERS[model.provider] || GOOGLE_PROVIDERS[model.api]) return "google";
-    if (model.api === "openai-responses" || model.api === "openai-codex-responses") return "openai";
+    if (
+        model.api === "openai-responses"
+        || model.api === "azure-openai-responses"
+        || model.api === "openai-codex-responses"
+    ) return "openai";
     if (model.api === "anthropic-messages") return "anthropic";
     return "unsupported";
 }
