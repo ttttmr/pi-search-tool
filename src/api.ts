@@ -16,6 +16,13 @@ type ProviderConfig = {
     buildRequest?: GoogleRequestBuilder;
 };
 
+const ANTIGRAVITY_MODEL_MAP: Record<string, string> = {
+    "gemini-3.7-flash": "gemini-3.7-flash-medium",
+    "gemini-3.7-flash-medium": "gemini-3.7-flash-medium",
+    "gemini-3.6-flash": "gemini-3.6-flash-low",
+    "gemini-3.5-flash": "gemini-3.5-flash-extra-low",
+};
+
 const GOOGLE_PROVIDERS: Record<string, ProviderConfig> = {
     "google-generative-ai": {
         kind: "google",
@@ -46,22 +53,17 @@ const GOOGLE_PROVIDERS: Record<string, ProviderConfig> = {
                     token = auth.apiKey;
                 }
             }
-            let runtimeModel = model.id;
-            if (runtimeModel === "gemini-3.7-flash" || runtimeModel === "gemini-3.7-flash-medium") {
-                runtimeModel = "gemini-3.7-flash-medium";
-            } else if (runtimeModel === "gemini-3.6-flash") {
-                runtimeModel = "gemini-3.6-flash-low";
-            } else if (runtimeModel === "gemini-3.5-flash") {
-                runtimeModel = "gemini-3.5-flash-extra-low";
-            }
+            const runtimeModel = ANTIGRAVITY_MODEL_MAP[model.id] || model.id;
             const platform = process.platform === "darwin" ? "MACOS" : process.platform === "win32" ? "WINDOWS" : "LINUX";
+            const osType = process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "windows" : "linux";
+            const arch = process.arch === "arm64" ? "arm64" : "x64";
             return {
                 url: "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
                 headers: {
                     "Authorization": `Bearer ${token}`,
                     "Content-Type": "application/json",
                     "Accept": "text/event-stream",
-                    "User-Agent": "antigravity/hub/2.8.0 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)",
+                    "User-Agent": `antigravity/hub/2.8.0 ${osType}/${arch}`,
                     "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
                     "Client-Metadata": JSON.stringify({
                         ideType: "ANTIGRAVITY",
@@ -85,7 +87,6 @@ const GOOGLE_PROVIDERS: Record<string, ProviderConfig> = {
 };
 
 export function getProviderKind(model: Model<Api>): ProviderKind {
-    if (model.provider === "antigravity" || model.api === "antigravity") return "google";
     if (GOOGLE_PROVIDERS[model.provider] || GOOGLE_PROVIDERS[model.api]) return "google";
     if (
         model.api === "openai-responses"
