@@ -1,6 +1,6 @@
 # pi-web-search
 
-Provider-native web search for [pi](https://github.com/earendil-works/pi-coding-agent), across Google Gemini, OpenAI, and Anthropic, plus Gemini-only URL Context analysis.
+Provider-native web search for [pi](https://pi.dev) with Gemini + URL Context, OpenAI Responses variants, and Anthropic.
 
 ## Tools
 
@@ -13,12 +13,13 @@ Search the web using your currently selected model. Automatically picks the righ
 | Google Gemini | Grounding with Google Search |
 | OpenAI | Responses API web search |
 | Azure OpenAI | Responses API web search (`azure-openai-responses`) |
-| OpenAI Codex | Codex Responses API web search |
+| OpenAI Codex | Codex Responses API web search (`openai-codex-responses`) |
+| GitHub Copilot | OpenAI Responses API web search via Copilot credentials |
 | Anthropic | Messages API web search |
 
 GitHub Copilot OpenAI Responses models are supported, including Business and Enterprise seats whose API endpoint is resolved from their authenticated Copilot credentials. This includes models such as `gpt-5.6-sol`.
 
-Supports passing up to 20 additional URLs to analyze alongside the query.
+Supports passing up to 20 additional URLs to analyze alongside the query. Successful `web_search` results are collapsed by default in pi; expand the tool call to inspect the full answer and source details.
 
 ### `url_context`
 
