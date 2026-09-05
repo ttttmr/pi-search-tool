@@ -1,7 +1,7 @@
 import type { ExtensionContext, AgentToolResult } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getProviderKind } from "./api.ts";
@@ -19,6 +19,7 @@ export function formatResult(text: string, details: any): AgentToolResult<any> {
 // --- Model Selection ---
 
 const SUPPORTED_PROVIDERS = ["google-generative-ai", "antigravity", "openai-responses", "azure-openai-responses", "openai-codex-responses", "anthropic-messages"];
+const PREFERENCES_CONFIG_PATH = join(homedir(), ".pi", "agent", "preferences.json");
 const WEB_SEARCH_CONFIG_PATH = join(homedir(), ".pi", "agent", "web-search.json");
 
 type WebSearchModelConfig =
@@ -40,6 +41,24 @@ function getWebSearchConfigPath(): string {
 }
 
 function readWebSearchModelConfig(): WebSearchModelConfig {
+    // 1. Priorité aux préférences unifiées (preferences.json)
+    try {
+        const prefsPath = PREFERENCES_CONFIG_PATH;
+        if (existsSync(prefsPath)) {
+            const rawPrefs = readFileSync(prefsPath, "utf8");
+            const prefs = JSON.parse(rawPrefs);
+            if (prefs && typeof prefs === "object" && prefs.webSearch && typeof prefs.webSearch === "object") {
+                const provider = prefs.webSearch.provider;
+                const modelId = prefs.webSearch.model ?? prefs.webSearch.modelId;
+                if (typeof provider === "string" && provider.trim() !== "" && typeof modelId === "string" && modelId.trim() !== "") {
+                    return { status: "configured", path: prefsPath, provider: provider.trim(), modelId: modelId.trim() };
+                }
+            }
+        }
+    } catch {
+        // Fallback to legacy web-search.json or env
+    }
+
     const path = getWebSearchConfigPath();
     let raw: string;
     try {
