@@ -38,7 +38,7 @@ pi install npm:pi-web-search
 
 No extra config needed. Select a supported current model in pi and the tools auto-detect the matching provider API.
 
-`web_search` will not scan configured models and pick one automatically when the current model does not support native search. To use a dedicated search model, opt in explicitly with `~/.pi/agent/web-search.json`:
+`web_search` will not scan configured models and pick one automatically when the current model does not support native search. To use a dedicated search model, opt in explicitly with `web-search.json` in pi's agent directory (by default `~/.pi/agent/`; respects `PI_CODING_AGENT_DIR`):
 
 ```json
 {

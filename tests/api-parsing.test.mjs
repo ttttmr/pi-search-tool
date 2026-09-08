@@ -1120,6 +1120,51 @@ test('getWebSearchModel prefers explicit config over current conversation model'
   }
 });
 
+test('getWebSearchModel respects PI_CODING_AGENT_DIR for the default config path', async () => {
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousConfigPath = process.env.PI_WEB_SEARCH_CONFIG;
+  const agentDir = await mkdtemp(join(tmpdir(), 'pi-web-search-agent-'));
+  const currentModel = {
+    id: 'current-test',
+    provider: 'current-provider',
+    api: 'openai-responses',
+    baseUrl: 'https://example.test/current',
+    headers: {},
+  };
+  const configuredModel = {
+    id: 'gpt-test',
+    provider: 'proxy-provider',
+    api: 'openai-responses',
+    baseUrl: 'https://example.test/v1',
+    headers: {},
+  };
+  const ctx = {
+    model: currentModel,
+    modelRegistry: {
+      find(provider, modelId) {
+        return provider === configuredModel.provider && modelId === configuredModel.id ? configuredModel : undefined;
+      },
+      getAvailable() {
+        return [currentModel, configuredModel];
+      },
+    },
+  };
+
+  try {
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    delete process.env.PI_WEB_SEARCH_CONFIG;
+    await writeFile(join(agentDir, 'web-search.json'), JSON.stringify({ provider: 'proxy-provider', model: 'gpt-test' }));
+
+    assert.equal(await getWebSearchModel(ctx), configuredModel);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousConfigPath === undefined) delete process.env.PI_WEB_SEARCH_CONFIG;
+    else process.env.PI_WEB_SEARCH_CONFIG = previousConfigPath;
+    await rm(agentDir, { recursive: true, force: true });
+  }
+});
+
 test('getWebSearchModel reports unsupported configured model instead of falling back', async () => {
   const previousConfigPath = process.env.PI_WEB_SEARCH_CONFIG;
   const dir = await mkdtemp(join(tmpdir(), 'pi-web-search-test-'));

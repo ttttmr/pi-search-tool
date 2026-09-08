@@ -1,8 +1,7 @@
 import type { ExtensionContext, AgentToolResult } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
+import { truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { getProviderKind } from "./api.ts";
 
@@ -19,7 +18,6 @@ export function formatResult(text: string, details: any): AgentToolResult<any> {
 // --- Model Selection ---
 
 const SUPPORTED_PROVIDERS = ["google-generative-ai", "xai", "openai-responses", "azure-openai-responses", "openai-codex-responses", "anthropic-messages"];
-const WEB_SEARCH_CONFIG_PATH = join(homedir(), ".pi", "agent", "web-search.json");
 
 type WebSearchModelConfig =
     | { status: "missing"; path: string; }
@@ -36,7 +34,7 @@ function describeModel(model: Model<Api>): string {
 }
 
 function getWebSearchConfigPath(): string {
-    return process.env.PI_WEB_SEARCH_CONFIG || WEB_SEARCH_CONFIG_PATH;
+    return process.env.PI_WEB_SEARCH_CONFIG || join(getAgentDir(), "web-search.json");
 }
 
 function readWebSearchModelConfig(): WebSearchModelConfig {
