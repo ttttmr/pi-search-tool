@@ -1,6 +1,6 @@
 # pi-web-search
 
-Provider-native web search for [pi](https://pi.dev) with Gemini + URL Context, OpenAI Responses variants, and Anthropic.
+Provider-native web search for [pi](https://pi.dev) with Gemini + URL Context, xAI Grok, OpenAI Responses variants, and Anthropic.
 
 ## Tools
 
@@ -11,6 +11,7 @@ Search the web using your currently selected model. Automatically picks the righ
 | Provider | API |
 |---|---|
 | Google Gemini | Grounding with Google Search |
+| xAI Grok | Responses API `web_search` |
 | OpenAI | Responses API web search |
 | Azure OpenAI | Responses API web search (`azure-openai-responses`) |
 | OpenAI Codex | Codex Responses API web search (`openai-codex-responses`) |

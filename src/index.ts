@@ -63,7 +63,7 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool({
         name: WEB_SEARCH_TOOL,
         label: "Web Search",
-        description: "Search the web using the current supported provider (Google Gemini, OpenAI, or Anthropic). Optionally include URLs to analyze alongside search results.",
+        description: "Search the web using the current supported provider (Google Gemini, xAI Grok, OpenAI, or Anthropic). Optionally include URLs to analyze alongside search results.",
         parameters: WebSearchSchema,
         execute: webSearch,
         renderCall(args, theme) {

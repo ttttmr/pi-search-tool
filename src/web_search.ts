@@ -59,7 +59,14 @@ export async function webSearch(
         const cited = applyCitations(result.text, result.groundingMetadata);
         const text = cited.text;
         const sources = result.sources?.length ? result.sources : cited.sources;
-        const extraSearchResults = (result.searchResults || []).filter((item) => item.url && !sources.some((source) => source.url === item.url));
+        const seenAdditionalResults = new Set<string>();
+        const extraSearchResults = (result.searchResults || []).filter((item) => {
+            if (!item.url || sources.some((source) => source.url === item.url)) return false;
+            const key = `${item.title || ""}\t${item.url}`;
+            if (seenAdditionalResults.has(key)) return false;
+            seenAdditionalResults.add(key);
+            return true;
+        });
 
         // Handle URL context metadata
         const urlMeta = result.urlContextMetadata?.urlMetadata 
@@ -90,16 +97,11 @@ export async function webSearch(
         }
 
         if (extraSearchResults.length) {
-            const visibleResults = extraSearchResults.slice(0, 8);
-            summary += `\n\n## Additional Search Results\n${visibleResults.map((r, i) => {
+            summary += `\n\n## Additional Search Results\n${extraSearchResults.map((r, i) => {
                 const label = r.title || r.url || `Result ${i + 1}`;
                 const url = r.url ? ` - ${r.url}` : "";
-                const meta = [r.source, r.type, r.status, r.query ? `query=${r.query}` : undefined].filter(Boolean).join(", ");
-                return `${i + 1}. ${label}${url}${meta ? ` (${meta})` : ""}`;
+                return `${i + 1}. ${label}${url}`;
             }).join("\n")}`;
-            if (extraSearchResults.length > visibleResults.length) {
-                summary += `\n... and ${extraSearchResults.length - visibleResults.length} more results in tool details.`;
-            }
         }
 
         return formatResult(summary, {

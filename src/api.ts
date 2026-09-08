@@ -5,7 +5,7 @@ import { TextEncoder, TextDecoder } from "util";
 
 // --- Provider Configuration ---
 
-type ProviderKind = "google" | "openai" | "anthropic" | "unsupported";
+type ProviderKind = "google" | "openai" | "xai" | "anthropic" | "unsupported";
 
 type GoogleRequestBuilder = (model: Model<Api>, body: any) => { url: string; headers: Record<string, string>; body: any };
 
@@ -34,6 +34,7 @@ const GOOGLE_PROVIDERS: Record<string, ProviderConfig> = {
 
 export function getProviderKind(model: Model<Api>): ProviderKind {
     if (GOOGLE_PROVIDERS[model.provider] || GOOGLE_PROVIDERS[model.api]) return "google";
+    if (model.provider === "xai" && model.api === "openai-responses") return "xai";
     if (
         model.api === "openai-responses"
         || model.api === "azure-openai-responses"
@@ -464,6 +465,14 @@ async function resolveGoogleGroundingRedirectUrls(searchResults: SearchResultDet
     }
 }
 
+function preserveInlineCitations(text: string, citations: Array<{ endIndex?: number; title: string; url: string }>): { text: string; sources: Source[] } {
+    const sources: Source[] = [];
+    for (const citation of citations) {
+        if (citation.url) pushUniqueSource(sources, { title: citation.title, url: citation.url });
+    }
+    return { text, sources };
+}
+
 function applyIndexCitations(text: string, citations: Array<{ endIndex?: number; title: string; url: string }>): { text: string; sources: Source[] } {
     const sources: Source[] = [];
     const insertions = citations
@@ -682,15 +691,20 @@ async function callOpenAIStream(
     }
     const requestHeaders = Object.fromEntries(headers.entries());
 
+    const isXai = getProviderKind(model) === "xai";
+    const searchProvider: ProviderKind = isXai ? "xai" : "openai";
+    const providerSourceName = isXai ? "xai" : "openai";
     const requestBody: any = {
         model: model.id,
         input: isCodex
             ? [{ role: "user", content: [{ type: "input_text", text: prompt }] }]
-            : prompt,
+            : isXai
+                ? [{ role: "user", content: prompt }]
+                : prompt,
         tools: [{ type: "web_search" }],
-        include: isCodex
-            ? ["web_search_call.action.sources"]
-            : ["web_search_call.action.sources", "web_search_call.results"],
+        ...(isCodex || isXai
+            ? { include: ["web_search_call.action.sources"] }
+            : { include: ["web_search_call.action.sources", "web_search_call.results"] }),
         stream: true,
         store: false,
     };
@@ -712,7 +726,7 @@ async function callOpenAIStream(
     });
 
     if (!response.ok) {
-        throw new Error(`OpenAI API error (${response.status}): ${await response.text()}`);
+        throw new Error(`${isXai ? "xAI" : "OpenAI"} API error (${response.status}): ${await response.text()}`);
     }
 
     let accumulatedText = "";
@@ -734,7 +748,7 @@ async function callOpenAIStream(
         const action = item.action || {};
         const call: NativeSearchCallDetail = {
             id: item.id,
-            provider: "openai",
+            provider: searchProvider,
             status: item.status,
             actionType: action.type,
             raw: item,
@@ -754,7 +768,7 @@ async function callOpenAIStream(
                 pushUniqueSearchResult(searchResults, {
                     title: source.title || source.display_name || source.name || titleFromUrl(source.url),
                     url: source.url,
-                    source: "openai.web_search_call.action.sources",
+                    source: `${providerSourceName}.web_search_call.action.sources`,
                     type: source.type || "url",
                     raw: source,
                 });
@@ -765,7 +779,7 @@ async function callOpenAIStream(
             pushUniqueSearchResult(searchResults, {
                 title: titleFromUrl(action.url),
                 url: action.url,
-                source: `openai.web_search_call.action.${action.type}`,
+                source: `${providerSourceName}.web_search_call.action.${action.type}`,
                 type: action.type,
                 raw: action,
             });
@@ -815,21 +829,23 @@ async function callOpenAIStream(
             pushNativeSearchEvent(nativeSearchEvents, event.type);
             const call = nativeSearchCalls.find((item) => item.id === event.item_id);
             if (call) call.status = event.type.replace("response.web_search_call.", "");
-            else nativeSearchCalls.push({ id: event.item_id, provider: "openai", status: event.type.replace("response.web_search_call.", ""), raw: event });
+            else nativeSearchCalls.push({ id: event.item_id, provider: searchProvider, status: event.type.replace("response.web_search_call.", ""), raw: event });
             if (event.type === "response.web_search_call.searching") {
                 onUpdate?.({
-                    content: [{ type: "text", text: accumulatedText || "Searching the web with OpenAI..." }],
+                    content: [{ type: "text", text: accumulatedText || `Searching the web with ${isXai ? "xAI" : "OpenAI"}...` }],
                     details: { streaming: true, searching: true }
                 });
             }
         }
     });
 
-    const cited = applyIndexCitations(accumulatedText || "No answer available.", citations);
+    const cited = isXai
+        ? preserveInlineCitations(accumulatedText || "No answer available.", citations)
+        : applyIndexCitations(accumulatedText || "No answer available.", citations);
     const citationDetails = citations.map((citation) => ({
         title: citation.title,
         url: citation.url,
-        source: "openai.url_citation",
+        source: `${providerSourceName}.url_citation`,
         type: "citation",
         raw: citation,
     }));
@@ -843,7 +859,7 @@ async function callOpenAIStream(
     return {
         text: cited.text,
         sources: cited.sources.length ? cited.sources.map((source) => ({ ...source, url: normalizeSearchUrl(source.url) })).filter((source) => !isLikelyJunkSearchUrl(source.url)) : derivedSources,
-        providerKind: "openai",
+        providerKind: searchProvider,
         nativeSearchUsed: nativeSearchEvents.length > 0 || nativeSearchCalls.length > 0 || sanitizedSearchResults.length > 0,
         nativeSearchEvents,
         nativeSearchCalls,
@@ -1036,7 +1052,7 @@ export async function callApiStream(
         throw new Error("No prompt text found in request body");
     }
 
-    if (kind === "openai") {
+    if (kind === "openai" || kind === "xai") {
         return callOpenAIStream(ctx, model, prompt, onUpdate, signal);
     }
     if (kind === "anthropic") {

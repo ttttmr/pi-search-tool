@@ -277,6 +277,153 @@ test('OpenAI stream exposes native search calls, queries, URLs, and citations', 
   }
 });
 
+test('xAI Responses uses Grok web search schema and inline citations', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    assert.equal(url, 'https://api.x.ai/v1/responses');
+    assert.equal(init.headers.authorization, 'Bearer xai-test-key');
+
+    const body = JSON.parse(init.body);
+    assert.equal(body.model, 'grok-4.6');
+    assert.deepEqual(body.input, [{ role: 'user', content: 'Search xAI docs' }]);
+    assert.deepEqual(body.tools, [{ type: 'web_search' }]);
+    assert.deepEqual(body.include, ['web_search_call.action.sources']);
+    assert.equal(body.store, false);
+
+    return makeResponse([
+      { data: { type: 'response.web_search_call.searching', item_id: 'ws_xai' } },
+      { data: { type: 'response.output_item.done', item: {
+        type: 'web_search_call',
+        id: 'ws_xai',
+        status: 'completed',
+        action: { type: 'search', query: 'Search xAI docs', sources: [{ type: 'url', url: 'https://docs.x.ai/' }] },
+      } } },
+      { data: { type: 'response.output_text.delta', delta: 'xAI docs answer[[1]](https://docs.x.ai/)' } },
+      { data: { type: 'response.output_text.annotation.added', annotation: {
+        type: 'url_citation',
+        start_index: 0,
+        end_index: 13,
+        title: '1',
+        url: 'https://docs.x.ai/',
+      } } },
+      { data: { type: 'response.completed', response: { output: [
+        { type: 'web_search_call', id: 'ws_xai', status: 'completed', action: { type: 'search', query: 'Search xAI docs', sources: [{ type: 'url', url: 'https://docs.x.ai/' }] } },
+        { type: 'message', content: [{ type: 'output_text', text: 'xAI docs answer[[1]](https://docs.x.ai/)', annotations: [{ type: 'url_citation', title: '1', url: 'https://docs.x.ai/' }] }] },
+      ] } } },
+    ]);
+  };
+
+  try {
+    const result = await callApiStream(mockCtx('xai-test-key'), {
+      id: 'grok-4.6',
+      provider: 'xai',
+      api: 'openai-responses',
+      baseUrl: 'https://api.x.ai/v1',
+      reasoning: true,
+      headers: {},
+    }, { contents: [{ parts: [{ text: 'Search xAI docs' }] }] });
+
+    assert.equal(result.providerKind, 'xai');
+    assert.equal(result.nativeSearchUsed, true);
+    assert.deepEqual(result.searchQueries, ['Search xAI docs']);
+    assert.equal(result.nativeSearchCalls[0].provider, 'xai');
+    assert.equal(result.text, 'xAI docs answer[[1]](https://docs.x.ai/)');
+    assert.equal(result.sources[0].title, '1');
+    assert.equal(result.sources[0].url, 'https://docs.x.ai/');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('web_search exposes all additional results without provider metadata', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => makeResponse([
+    { data: { type: 'response.output_text.delta', delta: 'Search answer[[1]](https://primary.example/)' } },
+    { data: { type: 'response.output_text.annotation.added', annotation: {
+      type: 'url_citation',
+      start_index: 0,
+      end_index: 13,
+      title: '1',
+      url: 'https://primary.example/',
+    } } },
+    { data: { type: 'response.output_item.done', item: {
+      type: 'web_search_call',
+      id: 'ws_additional',
+      status: 'completed',
+      action: { type: 'search', query: 'additional results', sources: [
+        { type: 'url', title: 'Primary', url: 'https://primary.example/' },
+        { type: 'url', title: 'Secondary', url: 'https://secondary.example/' },
+        { type: 'page', title: 'Secondary', url: 'https://secondary.example/' },
+        { type: 'url', title: 'Tertiary', url: 'https://tertiary.example/' },
+      ] },
+    } } },
+    { data: { type: 'response.completed', response: { output: [
+      { type: 'web_search_call', id: 'ws_additional', status: 'completed', action: { type: 'search', sources: [
+        { type: 'url', title: 'Primary', url: 'https://primary.example/' },
+        { type: 'url', title: 'Secondary', url: 'https://secondary.example/' },
+        { type: 'url', title: 'Tertiary', url: 'https://tertiary.example/' },
+      ] } },
+      { type: 'message', content: [{ type: 'output_text', text: 'Search answer[[1]](https://primary.example/)', annotations: [{ type: 'url_citation', title: '1', url: 'https://primary.example/' }] }] },
+    ] } } },
+  ]);
+
+  try {
+    const result = await webSearch(
+      'web-search-test',
+      { query: 'additional results' },
+      new AbortController().signal,
+      undefined,
+      mockCtx('xai-test-key', {
+        id: 'grok-4.6',
+        provider: 'xai',
+        api: 'openai-responses',
+        baseUrl: 'https://api.x.ai/v1',
+        reasoning: true,
+        headers: {},
+      }),
+    );
+    const text = result.content[0].text;
+
+    assert.match(text, /## Additional Search Results/);
+    assert.equal((text.match(/Secondary - https:\/\/secondary\.example\//g) || []).length, 1);
+    assert.match(text, /Tertiary - https:\/\/tertiary\.example\//);
+    assert.doesNotMatch(text, /xai\.web_search_call\.action\.sources/);
+    assert.doesNotMatch(text, /more results in tool details/);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('xAI stream falls back to env API key when resolved auth has no credential', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousXaiApiKey = process.env.XAI_API_KEY;
+  process.env.XAI_API_KEY = 'env-xai-key';
+  globalThis.fetch = async (_url, init) => {
+    assert.equal(init.headers.authorization, 'Bearer env-xai-key');
+    return makeResponse([
+      { data: { type: 'response.output_text.delta', delta: 'xAI fallback auth accepted' } },
+      { data: { type: 'response.done', response: { output: [] } } },
+    ]);
+  };
+
+  try {
+    const result = await callApiStream(mockCtx(undefined), {
+      id: 'grok-4.6',
+      provider: 'xai',
+      api: 'openai-responses',
+      baseUrl: 'https://api.x.ai/v1',
+      reasoning: true,
+      headers: {},
+    }, { contents: [{ parts: [{ text: 'Search with xAI fallback auth' }] }] });
+
+    assert.equal(result.text, 'xAI fallback auth accepted');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousXaiApiKey === undefined) delete process.env.XAI_API_KEY;
+    else process.env.XAI_API_KEY = previousXaiApiKey;
+  }
+});
+
 test('OpenAI stream falls back to env API key when resolved auth has no credential', async () => {
   const previousFetch = globalThis.fetch;
   const previousOpenAiApiKey = process.env.OPENAI_API_KEY;
@@ -905,6 +1052,30 @@ test('getModel accepts openai-codex Responses models', async () => {
   };
 
   assert.equal(await getModel(ctx), model);
+});
+
+test('getModel accepts xAI Responses models and rejects xAI Completions models', async () => {
+  const model = {
+    id: 'grok-4.6',
+    provider: 'xai',
+    api: 'openai-responses',
+    baseUrl: 'https://api.x.ai/v1',
+    headers: {},
+  };
+  const ctx = {
+    model,
+    modelRegistry: {
+      getAvailable() {
+        return [model];
+      },
+    },
+  };
+
+  assert.equal(await getModel(ctx), model);
+  assert.equal(await getModel({
+    ...ctx,
+    model: { ...model, api: 'openai-completions' },
+  }), undefined);
 });
 
 test('getWebSearchModel prefers explicit config over current conversation model', async () => {

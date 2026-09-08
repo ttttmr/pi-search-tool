@@ -12,6 +12,7 @@ function usage() {
 This script reads its configuration from .env / process.env.
 
 Required env:
+  PI_WEB_SEARCH_MODEL_XAI
   PI_WEB_SEARCH_MODEL_OPENAI
   PI_WEB_SEARCH_MODEL_ANTHROPIC
   PI_WEB_SEARCH_MODEL_GOOGLE
@@ -34,6 +35,7 @@ const pluginExtension = process.env.PI_WEB_SEARCH_EXTENSION || './src/index.ts';
 const providerExtensions = getCsvEnv('PI_PROVIDER_EXTENSIONS');
 const extensions = [...providerExtensions, pluginExtension];
 const models = [
+  process.env.PI_WEB_SEARCH_MODEL_XAI,
   process.env.PI_WEB_SEARCH_MODEL_OPENAI,
   process.env.PI_WEB_SEARCH_MODEL_ANTHROPIC,
   process.env.PI_WEB_SEARCH_MODEL_GOOGLE,
@@ -41,7 +43,7 @@ const models = [
 
 if (models.length === 0) {
   usage();
-  throw new Error('No real web_search models configured. Set PI_WEB_SEARCH_MODEL_OPENAI / ANTHROPIC / GOOGLE in .env');
+  throw new Error('No real web_search models configured. Set PI_WEB_SEARCH_MODEL_XAI / OPENAI / ANTHROPIC / GOOGLE in .env');
 }
 
 let failed = false;
